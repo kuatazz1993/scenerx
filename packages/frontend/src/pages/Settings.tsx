@@ -303,7 +303,7 @@ function Settings() {
             <VStack align="stretch" spacing={2}>
               <HStack justify="space-between">
                 <Text>Application</Text>
-                <Text fontWeight="bold">GreenSVC</Text>
+                <Text fontWeight="bold">SceneRx</Text>
               </HStack>
               <HStack justify="space-between">
                 <Text>Version</Text>

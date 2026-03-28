@@ -7,7 +7,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Form, Query
 
-from app.api.deps import get_vision_client, get_settings_dep
+from app.api.deps import get_vision_client, get_settings_dep, get_current_user
+from app.models.user import UserResponse
 from app.core.config import Settings
 from app.services.vision_client import VisionModelClient
 from app.models.vision import (
@@ -70,6 +71,7 @@ async def analyze_image(
     request_data: str = Form(...),
     vision_client: VisionModelClient = Depends(get_vision_client),
     settings: Settings = Depends(get_settings_dep),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """
     Analyze an uploaded image using Vision API
@@ -121,6 +123,7 @@ async def analyze_image_by_path(
     settings: Settings = Depends(get_settings_dep),
     project_id: Optional[str] = Query(None),
     image_id: Optional[str] = Query(None),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """
     Analyze an image from a local path.
@@ -167,6 +170,7 @@ async def analyze_project_image(
     request: VisionAnalysisRequest = Body(...),
     vision_client: VisionModelClient = Depends(get_vision_client),
     settings: Settings = Depends(get_settings_dep),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """
     Analyze a project image and persist masks to the project.
@@ -229,6 +233,7 @@ async def analyze_project_image_panorama(
     request: VisionAnalysisRequest = Body(...),
     vision_client: VisionModelClient = Depends(get_vision_client),
     settings: Settings = Depends(get_settings_dep),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """
     Analyze a project image as a panorama (split into left/front/right views).
@@ -293,6 +298,7 @@ async def batch_analyze(
     image_paths: list[str],
     request: VisionAnalysisRequest,
     vision_client: VisionModelClient = Depends(get_vision_client),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Analyze multiple images"""
     # Validate all images exist

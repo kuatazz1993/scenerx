@@ -29,30 +29,57 @@ class EvidenceCitation(BaseModel):
     confidence: str = ""
 
 
+class TransferabilitySummary(BaseModel):
+    """Pre-computed transferability profile for an indicator's evidence."""
+    high_count: int = 0
+    moderate_count: int = 0
+    low_count: int = 0
+    unknown_count: int = 0
+
+
+class EvidenceSummary(BaseModel):
+    """Agent 1 assessment card condensed into the final output."""
+    evidence_ids: list[str] = Field(default_factory=list)
+    inferential_count: int = 0
+    descriptive_count: int = 0
+    strength_score: str = ""        # A / B / C
+    strongest_tier: str = ""        # TIR_T1 / TIR_T2 / TIR_T3
+    best_significance: str = ""     # SIG_001 / SIG_01 / SIG_05 / SIG_NS
+    dominant_direction: str = ""    # DIR_POS / DIR_NEG / DIR_MIX
+
+
 class IndicatorRelationship(BaseModel):
     """Relationship between two recommended indicators."""
     indicator_a: str
     indicator_b: str
-    relationship_type: str = ""
+    relationship_type: str = ""  # SYNERGISTIC / TRADE_OFF / INDEPENDENT
     explanation: str = ""
 
 
 class RecommendationSummary(BaseModel):
     key_findings: list[str] = Field(default_factory=list)
     evidence_gaps: list[str] = Field(default_factory=list)
+    transferability_caveats: list[str] = Field(default_factory=list)
+    dimension_coverage: list[dict] = Field(default_factory=list)
 
 
 class IndicatorRecommendation(BaseModel):
     """Single indicator recommendation from LLM"""
     indicator_id: str
     indicator_name: str
-    relevance_score: float = Field(ge=0, le=1)
-    rationale: str
+    relevance_score: float = Field(default=0, ge=0, le=1)
+    rationale: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     evidence_citations: list[EvidenceCitation] = Field(default_factory=list)
     rank: int = 0
-    relationship_direction: str = ""
-    confidence: str = ""
+    relationship_direction: str = ""  # INCREASE / DECREASE
+    confidence: str = ""  # high / medium / low
+    # New fields from two-agent pipeline
+    strength_score: str = ""          # A / B / C
+    evidence_summary: EvidenceSummary | None = None
+    transferability_summary: TransferabilitySummary | None = None
+    dimension_id: str = ""
+    subdimension_id: str = ""
 
 
 class RecommendationRequest(BaseModel):
@@ -61,6 +88,8 @@ class RecommendationRequest(BaseModel):
     project_location: str = ""
     space_type_id: str = ""
     koppen_zone_id: str = ""
+    lcz_type_id: str = ""
+    age_group_id: str = ""
     performance_dimensions: list[str] = Field(default_factory=list)
     subdimensions: list[str] = Field(default_factory=list)
     design_brief: str = ""

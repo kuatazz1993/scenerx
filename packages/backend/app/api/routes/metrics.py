@@ -7,7 +7,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 
-from app.api.deps import get_metrics_manager, get_metrics_calculator
+from app.api.deps import get_metrics_manager, get_metrics_calculator, get_current_user
+from app.models.user import UserResponse
 from app.services.metrics_manager import MetricsManager
 from app.services.metrics_calculator import MetricsCalculator
 from app.models.metrics import (
@@ -56,6 +57,7 @@ async def get_calculator_code(
 async def upload_calculator(
     file: UploadFile = File(...),
     manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Upload a new calculator file"""
     # Validate filename
@@ -99,6 +101,7 @@ async def upload_calculator(
 async def delete_calculator(
     indicator_id: str,
     manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Delete a calculator"""
     if not manager.has_calculator(indicator_id):

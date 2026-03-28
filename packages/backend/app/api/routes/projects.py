@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 
 from pydantic import BaseModel
 
@@ -20,6 +20,8 @@ from app.models.project import (
     SpatialRelation,
     UploadedImage,
 )
+from app.models.user import UserResponse
+from app.api.deps import get_current_user
 
 
 class ZoneAssignment(BaseModel):
@@ -37,7 +39,7 @@ def get_projects_store() -> ProjectStore:
 
 
 @router.post("", response_model=ProjectResponse)
-async def create_project(project: ProjectCreate):
+async def create_project(project: ProjectCreate, _user: UserResponse = Depends(get_current_user)):
     """Create a new project"""
     store = get_project_store()
     project_id = str(uuid.uuid4())[:8]
@@ -100,7 +102,7 @@ async def get_project(project_id: str):
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
-async def update_project(project_id: str, updates: ProjectUpdate):
+async def update_project(project_id: str, updates: ProjectUpdate, _user: UserResponse = Depends(get_current_user)):
     """Update project"""
     store = get_project_store()
     project = store.get(project_id)
@@ -150,7 +152,7 @@ async def update_project(project_id: str, updates: ProjectUpdate):
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, _user: UserResponse = Depends(get_current_user)):
     """Delete project"""
     store = get_project_store()
     if not store.delete(project_id):
@@ -213,6 +215,7 @@ async def upload_images(
     project_id: str,
     files: List[UploadFile] = File(...),
     zone_id: Optional[str] = Form(None),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Upload images to a project"""
     store = get_project_store()
@@ -306,7 +309,7 @@ async def assign_image_to_zone(
 
 
 @router.delete("/{project_id}/images/{image_id}")
-async def delete_image(project_id: str, image_id: str):
+async def delete_image(project_id: str, image_id: str, _user: UserResponse = Depends(get_current_user)):
     """Delete an image from project"""
     store = get_project_store()
     project = store.get(project_id)

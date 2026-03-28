@@ -1,7 +1,9 @@
 """
-GreenSVC Stage 2.5 - OUTPUT LAYER（输出层）
+SceneRx Stage 2.5 - OUTPUT LAYER（输出层）
 ================================================
 🔒 完全统一，所有指标共用，无需修改
+
+更新: 清理 layer_results 输出，移除内部中间字段 'values'
 
 功能:
 1. 构建输出JSON结构
@@ -73,12 +75,24 @@ for zr in all_zone_results:
         
         zone_statistics.append(zone_stat)
 
+# 清理 layer_results：只保留 images 和 statistics，移除内部中间字段 values
+clean_layer_results = {}
+for zr in all_zone_results:
+    clean_layers = {}
+    for layer_name, layer_data in zr['layers'].items():
+        clean_layers[layer_name] = {
+            'images': layer_data['images'],         # 含 image_id, filename, value, lat, lng, ...
+            'statistics': layer_data['statistics']   # N, Mean, Std, Min, Max, Median
+        }
+        # 'values' 是纯数字列表，仅用于内部统计计算，不输出到 JSON
+    clean_layer_results[zr['zone_id']] = clean_layers
+
 # 构建完整输出结构
 output = {
     'computation_metadata': {
         'version': '2.5-EXCEL',
         'generated_at': datetime.now().isoformat(),
-        'system': 'GreenSVC-AI Stage 2.5: Single Indicator Computation',
+        'system': 'SceneRx-AI Stage 2.5: Single Indicator Computation',
         'indicator_id': INDICATOR['id'],
         'source_query': os.path.basename(PATHS['query_file']),
         'semantic_config': os.path.basename(PATHS['semantic_config']),
@@ -115,7 +129,7 @@ output = {
     },
     'descriptive_statistics_by_layer': layer_overall_stats,
     'zone_statistics': zone_statistics,
-    'layer_results': {zr['zone_id']: zr['layers'] for zr in all_zone_results}
+    'layer_results': clean_layer_results
 }
 
 print("✅ Output JSON structure built")

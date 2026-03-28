@@ -3,10 +3,16 @@ API Dependencies
 Dependency injection for FastAPI routes
 """
 
+import logging
 from functools import lru_cache
 from typing import Optional
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
 from app.core.config import Settings, get_settings
+from app.models.user import UserResponse
+from app.services.auth import AuthService, get_auth_service
 from app.services.vision_client import VisionModelClient
 from app.services.metrics_manager import MetricsManager
 from app.services.metrics_calculator import MetricsCalculator
@@ -14,6 +20,7 @@ from app.services.knowledge_base import KnowledgeBase
 from app.services.gemini_client import RecommendationService
 from app.services.llm_client import LLMClient, LLM_PROVIDERS, create_llm_client
 from app.services.zone_analyzer import ZoneAnalyzer
+from app.services.clustering_service import ClusteringService
 from app.services.design_engine import DesignEngine
 
 
@@ -32,6 +39,7 @@ _recommendation_service: RecommendationService = None
 _llm_client: LLMClient = None
 _zone_analyzer: ZoneAnalyzer = None
 _design_engine: DesignEngine = None
+_clustering_service: ClusteringService = None
 
 # Runtime provider override (None = use settings default)
 _active_provider: Optional[str] = None
@@ -103,6 +111,12 @@ def get_knowledge_base() -> KnowledgeBase:
         settings = get_settings()
         _knowledge_base = KnowledgeBase(
             knowledge_base_dir=str(settings.knowledge_base_full_path),
+            filenames={
+                "evidence": settings.kb_evidence_file,
+                "appendix": settings.kb_appendix_file,
+                "context":  settings.kb_context_file,
+                "iom":      settings.kb_iom_file,
+            },
         )
         _knowledge_base.load()
     return _knowledge_base
@@ -137,6 +151,14 @@ def get_zone_analyzer() -> ZoneAnalyzer:
     return _zone_analyzer
 
 
+def get_clustering_service() -> ClusteringService:
+    """Get ClusteringService singleton"""
+    global _clustering_service
+    if _clustering_service is None:
+        _clustering_service = ClusteringService()
+    return _clustering_service
+
+
 def get_design_engine() -> DesignEngine:
     """Get DesignEngine singleton"""
     global _design_engine
@@ -168,7 +190,7 @@ def reset_services() -> None:
     """Reset all service singletons (useful for testing)"""
     global _vision_client, _metrics_manager, _metrics_calculator
     global _knowledge_base, _recommendation_service, _llm_client
-    global _zone_analyzer, _design_engine
+    global _zone_analyzer, _design_engine, _clustering_service
     global _active_provider, _active_model
 
     _vision_client = None
@@ -179,5 +201,67 @@ def reset_services() -> None:
     _llm_client = None
     _zone_analyzer = None
     _design_engine = None
+    _clustering_service = None
     _active_provider = None
     _active_model = None
+
+
+# ---------------------------------------------------------------------------
+# Authentication dependencies
+# ---------------------------------------------------------------------------
+
+_logger = logging.getLogger(__name__)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+
+async def get_current_user(
+    token: Optional[str] = Depends(oauth2_scheme),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> Optional[UserResponse]:
+    """Return the authenticated user, or None when auth is disabled.
+
+    When AUTH_ENABLED=true, a missing/invalid token raises 401.
+    When AUTH_ENABLED=false (default), returns None so routes stay open.
+    """
+    settings = get_settings()
+
+    if not settings.auth_enabled:
+        return None
+
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    payload = auth_service.decode_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    user = auth_service.get_user_by_id(payload.sub)
+    if user is None:
+        raise credentials_exception
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inactive user",
+        )
+
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        username=user.username,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+    )

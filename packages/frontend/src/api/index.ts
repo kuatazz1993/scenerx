@@ -127,8 +127,11 @@ export const api = {
       performance_dimensions: string[];
       subdimensions?: string[];
       design_brief?: string;
+      project_location?: string;
       space_type_id?: string;
       koppen_zone_id?: string;
+      lcz_type_id?: string;
+      age_group_id?: string;
     }) => apiClient.post<RecommendationResponse>('/api/indicators/recommend', request),
     getDefinitions: () => apiClient.get<unknown[]>('/api/indicators/definitions'),
     getDimensions: () => apiClient.get<unknown[]>('/api/indicators/dimensions'),

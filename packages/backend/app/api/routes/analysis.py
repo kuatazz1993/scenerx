@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from app.models.analysis import (
     ZoneAnalysisRequest,
     ZoneAnalysisResult,
+    ClusteringResult,
     DesignStrategyRequest,
     DesignStrategyResult,
     FullAnalysisRequest,
@@ -20,13 +21,16 @@ from app.models.analysis import (
     ProjectPipelineRequest,
     ProjectPipelineResult,
     ProjectPipelineProgress,
+    IndicatorDefinitionInput,
 )
 from app.services.zone_analyzer import ZoneAnalyzer
 from app.services.design_engine import DesignEngine
+from app.services.clustering_service import ClusteringService
 from app.services.metrics_calculator import MetricsCalculator
 from app.services.metrics_manager import MetricsManager
 from app.services.metrics_aggregator import MetricsAggregator
-from app.api.deps import get_zone_analyzer, get_design_engine, get_metrics_calculator, get_metrics_manager
+from app.api.deps import get_zone_analyzer, get_design_engine, get_clustering_service, get_metrics_calculator, get_metrics_manager, get_current_user
+from app.models.user import UserResponse
 from app.api.routes.projects import get_projects_store
 
 logger = logging.getLogger(__name__)
@@ -42,6 +46,7 @@ router = APIRouter()
 def compute_zone_statistics(
     request: ZoneAnalysisRequest,
     analyzer: ZoneAnalyzer = Depends(get_zone_analyzer),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Run Stage 2.5 cross-zone statistical analysis (sync, pure numpy)."""
     try:
@@ -52,6 +57,103 @@ def compute_zone_statistics(
 
 
 # ---------------------------------------------------------------------------
+# Clustering: SVC Archetype Discovery
+# ---------------------------------------------------------------------------
+
+class ClusteringRequest(BaseModel):
+    """Request for SVC archetype clustering."""
+    point_metrics: list[dict]
+    indicator_definitions: dict[str, IndicatorDefinitionInput]
+    layer: str = "full"
+    max_k: int = 10
+    knn_k: int = 7
+
+
+class ClusteringResponse(BaseModel):
+    clustering: Optional[ClusteringResult] = None
+    segment_diagnostics: list = []
+    skipped: bool = False
+    reason: str = ""
+
+
+@router.post("/clustering", response_model=ClusteringResponse)
+def run_clustering(
+    request: ClusteringRequest,
+    service: ClusteringService = Depends(get_clustering_service),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Run SVC archetype clustering on geo-located image points.
+
+    Requires >= 20 points with indicator values. If coordinates (lat/lng) are
+    present, KNN spatial smoothing is applied.
+    """
+    try:
+        result = service.cluster(
+            point_metrics=request.point_metrics,
+            indicator_definitions=request.indicator_definitions,
+            layer=request.layer,
+            max_k=request.max_k,
+            knn_k=request.knn_k,
+        )
+        if result is None:
+            return ClusteringResponse(
+                skipped=True,
+                reason=f"Insufficient data ({len(request.point_metrics)} points, need >= 20)",
+            )
+        clustering_result, segment_diagnostics = result
+        return ClusteringResponse(
+            clustering=clustering_result,
+            segment_diagnostics=segment_diagnostics,
+        )
+    except Exception as e:
+        logger.error("Clustering failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Merged Export: indicator_results_merged.json
+# ---------------------------------------------------------------------------
+
+class MergedExportRequest(BaseModel):
+    """Request to generate the merged analysis JSON (Stage 2.5 + clustering)."""
+    zone_analysis: ZoneAnalysisResult
+    clustering: Optional[ClusteringResult] = None
+    segment_diagnostics: list = []
+
+
+@router.post("/export-merged")
+def export_merged(
+    request: MergedExportRequest,
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Return a single indicator_results_merged.json combining all Stage 2.5 outputs."""
+    za = request.zone_analysis
+    meta = za.computation_metadata.model_dump()
+    meta["stage3_compatible"] = True
+    meta["has_clustering"] = request.clustering is not None
+    meta["n_segments"] = len(request.segment_diagnostics)
+    meta["design_principle"] = "Color=Z-score(comparison), Text=Original(understanding)"
+
+    merged = {
+        "computation_metadata": meta,
+        "indicator_definitions": {k: v.model_dump() for k, v in za.indicator_definitions.items()},
+        "layer_statistics": za.layer_statistics,
+        "zone_statistics": [s.model_dump() for s in za.zone_statistics],
+        "zone_diagnostics": [d.model_dump() for d in za.zone_diagnostics],
+        "correlation_by_layer": za.correlation_by_layer,
+        "pvalue_by_layer": za.pvalue_by_layer,
+        "radar_profiles": za.radar_profiles,
+    }
+
+    if request.clustering:
+        merged["clustering"] = request.clustering.model_dump()
+    if request.segment_diagnostics:
+        merged["segment_diagnostics"] = request.segment_diagnostics
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Stage 3: Design Strategies
 # ---------------------------------------------------------------------------
 
@@ -59,6 +161,7 @@ def compute_zone_statistics(
 async def generate_design_strategies(
     request: DesignStrategyRequest,
     engine: DesignEngine = Depends(get_design_engine),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Run Stage 3 design strategy generation (async, LLM + rule-based fallback)."""
     try:
@@ -77,6 +180,7 @@ async def run_full_analysis(
     request: FullAnalysisRequest,
     analyzer: ZoneAnalyzer = Depends(get_zone_analyzer),
     engine: DesignEngine = Depends(get_design_engine),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Run the full analysis pipeline: Stage 2.5 → Stage 3."""
     try:
@@ -121,7 +225,7 @@ class AsyncAnalysisResponse(BaseModel):
 
 
 @router.post("/run-full/async", response_model=AsyncAnalysisResponse)
-async def run_full_analysis_async(request: FullAnalysisRequest):
+async def run_full_analysis_async(request: FullAnalysisRequest, _user: UserResponse = Depends(get_current_user)):
     """Submit full analysis pipeline as a background Celery task."""
     try:
         from app.core.celery_app import celery_app  # noqa: F811
@@ -153,6 +257,7 @@ async def run_project_pipeline(
     engine: DesignEngine = Depends(get_design_engine),
     calculator: MetricsCalculator = Depends(get_metrics_calculator),
     manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """Run the full project pipeline: per-image calculations → aggregate → Stage 2.5 → Stage 3."""
     steps: list[ProjectPipelineProgress] = []

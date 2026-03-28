@@ -1,20 +1,23 @@
 """
-GreenSVC Stage 2.5 - INPUT LAYER（输入层）
+SceneRx Stage 2.5 - INPUT LAYER（输入层）
 ================================================
 🔒 完全统一，所有指标共用，无需修改
 
 更新: 使用 color_coding_semantic_segmentation_classes.xlsx 替代 JSON
+更新: 新增图片元数据加载（image_id → lat/lng 映射）
 
 功能:
 1. Mount Google Drive
 2. 加载 Query 文件（获取区域清单）
 3. 扫描 Mask 文件夹（获取图片清单）
 4. 加载语义类别颜色配置（从Excel文件）
+5. 加载图片元数据（经纬度坐标，可选）
 
 输出变量（供后续层使用）:
 - query_data: 项目和区域信息
 - semantic_colors: {类别名称: (R, G, B)} 颜色映射
 - zone_image_map: {zone_id: {layer: [filenames]}} 图片清单
+- image_metadata: {image_id: {lat, lng, ...}} 图片元数据（可选）
 - PATHS: 路径配置
 - LAYERS: 图层列表
 """
@@ -38,6 +41,7 @@ except:
 import os
 import json
 import glob
+import csv
 import numpy as np
 from PIL import Image
 from datetime import datetime
@@ -56,13 +60,13 @@ except ImportError:
 # 3. PATH CONFIGURATION - 【根据你的项目修改这些路径】
 # =============================================================================
 if IN_COLAB:
-    BASE_PATH = "/content/drive/MyDrive/GreenSVC-AI-paper"
+    BASE_PATH = "/content/drive/MyDrive/SceneRx-AI-paper"
 else:
     BASE_PATH = "."  # 本地路径
 
 PATHS = {
     # 项目查询文件（定义区域）
-    "query_file": f"{BASE_PATH}/UserQueries/GreenSVC-AI_mock_filled_query_single_performance_photos_45_per_zone.json",
+    "query_file": f"{BASE_PATH}/UserQueries/SceneRx-AI_mock_filled_query_single_performance_photos_45_per_zone.json",
     
     # 语义类别颜色配置（Excel文件）
     "semantic_config": f"{BASE_PATH}/color_coding_semantic_segmentation_classes.xlsx",
@@ -71,7 +75,13 @@ PATHS = {
     "image_base_path": f"{BASE_PATH}/mask/",
     
     # 输出目录
-    "output_path": f"{BASE_PATH}/Outputs/"
+    "output_path": f"{BASE_PATH}/Outputs/",
+    
+    # 图片元数据文件（可选，含经纬度坐标）
+    # 支持 .csv 和 .json 格式
+    # CSV格式要求: 至少包含 image_id 列，可选 lat, lng 等列
+    # JSON格式要求: 列表，每项至少包含 image_id 字段
+    "image_metadata_file": f"{BASE_PATH}/image_metadata.csv"
 }
 
 # 处理的图层列表
@@ -282,6 +292,84 @@ def scan_zone_images(base_path: str, zone_id: str, layers: List[str]) -> Dict[st
 
 
 # =============================================================================
+# 6.5 LOAD IMAGE METADATA (图片元数据 - 经纬度坐标等，可选)
+# =============================================================================
+def load_image_metadata(metadata_path: str) -> Dict[str, Dict]:
+    """
+    加载图片元数据文件，获取每张图片的经纬度等附加信息。
+    
+    支持两种格式:
+    
+    CSV格式 (.csv):
+        image_id,lat,lng
+        BSV_00000,30.242099,120.163758
+        BSV_00001,30.242040,120.164352
+        
+    JSON格式 (.json):
+        [
+            {"image_id": "BSV_00000", "lat": 30.242099, "lng": 120.163758},
+            {"image_id": "BSV_00001", "lat": 30.242040, "lng": 120.164352}
+        ]
+    
+    除 image_id 外的所有字段都会被保留。
+    
+    Args:
+        metadata_path: 元数据文件路径（.csv 或 .json）
+        
+    Returns:
+        {image_id: {lat: float, lng: float, ...}} 字典
+        如果文件不存在或格式不支持，返回空字典 {}
+    """
+    if not os.path.exists(metadata_path):
+        return {}
+    
+    ext = os.path.splitext(metadata_path)[1].lower()
+    metadata = {}
+    
+    try:
+        if ext == '.csv':
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    img_id = row.get('image_id', '').strip()
+                    if not img_id:
+                        continue
+                    entry = {}
+                    for key, val in row.items():
+                        if key == 'image_id':
+                            continue
+                        # 尝试将数值字段转为 float
+                        try:
+                            entry[key] = float(val)
+                        except (ValueError, TypeError):
+                            entry[key] = val
+                    metadata[img_id] = entry
+                    
+        elif ext == '.json':
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # 支持列表格式
+            if isinstance(data, list):
+                for item in data:
+                    img_id = item.get('image_id', '').strip()
+                    if not img_id:
+                        continue
+                    entry = {k: v for k, v in item.items() if k != 'image_id'}
+                    metadata[img_id] = entry
+            # 支持字典格式 {image_id: {lat, lng, ...}}
+            elif isinstance(data, dict):
+                metadata = data
+                
+        else:
+            print(f"   ⚠️ Unsupported metadata format: {ext} (use .csv or .json)")
+            
+    except Exception as e:
+        print(f"   ⚠️ Error loading image metadata: {e}")
+    
+    return metadata
+
+
+# =============================================================================
 # 7. EXECUTE INPUT LAYER
 # =============================================================================
 print("\n" + "=" * 70)
@@ -340,7 +428,26 @@ for layer, count in total_images_by_layer.items():
     print(f"      • {layer}: {count} images")
 print(f"   ✅ Total images: {sum(total_images_by_layer.values())}")
 
-# 7.4 打印完成信息
+# 7.4 加载图片元数据（经纬度坐标等，可选）
+print(f"\n📍 Loading image metadata...")
+image_metadata = load_image_metadata(PATHS['image_metadata_file'])
+if image_metadata:
+    # 显示元数据中包含的字段
+    sample_entry = next(iter(image_metadata.values()))
+    available_fields = list(sample_entry.keys())
+    print(f"   ✅ Loaded metadata for {len(image_metadata)} images")
+    print(f"   ✅ Available fields: {available_fields}")
+    # 显示前3条作为示例
+    for i, (img_id, meta) in enumerate(image_metadata.items()):
+        if i >= 3:
+            break
+        print(f"      • {img_id}: {meta}")
+else:
+    print(f"   ℹ️ No image metadata found (file: {PATHS['image_metadata_file']})")
+    print(f"      Output will not include lat/lng coordinates.")
+    print(f"      To add coordinates, create a CSV with columns: image_id,lat,lng")
+
+# 7.5 打印完成信息
 print("\n" + "=" * 70)
 print("✅ INPUT LAYER COMPLETE")
 print("=" * 70)
@@ -349,6 +456,7 @@ Available variables:
   - query_data      : Project and zone information
   - semantic_colors : {{class_name: (R,G,B)}} color mapping ({len(semantic_colors)} classes)
   - zone_image_map  : {{zone_id: {{layer: [filenames]}}}} image listing
+  - image_metadata  : {{image_id: {{lat, lng, ...}}}} coordinates ({len(image_metadata)} images)
   - PATHS           : Path configuration
   - LAYERS          : Layer list {LAYERS}
 """)

@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 class KnowledgeBase:
     """Knowledge base for evidence-based indicator recommendation"""
 
-    def __init__(self, knowledge_base_dir: str):
+    def __init__(self, knowledge_base_dir: str, filenames: dict[str, str] | None = None):
         self.knowledge_base_dir = Path(knowledge_base_dir)
+        self.filenames = filenames or {}
 
         # Data stores
         self.evidence: list[dict] = []
@@ -26,7 +27,9 @@ class KnowledgeBase:
         # Indexes for fast lookup
         self._evidence_by_indicator: dict[str, list[dict]] = {}
         self._evidence_by_dimension: dict[str, list[dict]] = {}
+        self._evidence_by_subdimension: dict[str, list[dict]] = {}
         self._evidence_by_id: dict[str, dict] = {}
+        self._context_by_evidence: dict[str, dict] = {}
 
         self.loaded = False
 
@@ -37,33 +40,24 @@ class KnowledgeBase:
                 logger.warning(f"Knowledge base directory not found: {self.knowledge_base_dir}")
                 return False
 
-            # Load evidence
-            evidence_path = self.knowledge_base_dir / "Evidence_final_v5_2_fixed.json"
-            if evidence_path.exists():
-                with open(evidence_path, 'r', encoding='utf-8') as f:
-                    self.evidence = json.load(f)
-                logger.info(f"Loaded {len(self.evidence)} evidence records")
+            # Load each knowledge base file (configurable names, with warning on miss)
+            file_map = {
+                "evidence": self.filenames.get("evidence", "Evidence_final_v5_2_fixed.json"),
+                "appendix": self.filenames.get("appendix", "Appendix_final_v5_2_fixed.json"),
+                "context":  self.filenames.get("context",  "Context_final_v5_2_fixed.json"),
+                "iom":      self.filenames.get("iom",      "IOM_final_v5_2_fixed.json"),
+            }
 
-            # Load appendix (codebook)
-            appendix_path = self.knowledge_base_dir / "Appendix_final_v5_2_fixed.json"
-            if appendix_path.exists():
-                with open(appendix_path, 'r', encoding='utf-8') as f:
-                    self.appendix = json.load(f)
-                logger.info(f"Loaded appendix with {len(self.appendix)} sections")
-
-            # Load context
-            context_path = self.knowledge_base_dir / "Context_final_v5_2_fixed.json"
-            if context_path.exists():
-                with open(context_path, 'r', encoding='utf-8') as f:
-                    self.context = json.load(f)
-                logger.info("Loaded context data")
-
-            # Load IOM
-            iom_path = self.knowledge_base_dir / "IOM_final_v5_2_fixed.json"
-            if iom_path.exists():
-                with open(iom_path, 'r', encoding='utf-8') as f:
-                    self.iom = json.load(f)
-                logger.info(f"Loaded {len(self.iom)} IOM records")
+            for key, filename in file_map.items():
+                path = self.knowledge_base_dir / filename
+                if not path.exists():
+                    logger.warning(f"Knowledge base file not found: {path}")
+                    continue
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                setattr(self, key, data)
+                count = len(data) if isinstance(data, list) else len(data.keys()) if isinstance(data, dict) else 0
+                logger.info(f"Loaded {key} ({count} entries) from {filename}")
 
             # Build indexes
             self._build_indexes()
@@ -78,29 +72,35 @@ class KnowledgeBase:
         """Build indexes for fast lookup"""
         self._evidence_by_indicator = {}
         self._evidence_by_dimension = {}
+        self._evidence_by_subdimension = {}
         self._evidence_by_id = {}
+        self._context_by_evidence = {}
 
         for record in self.evidence:
-            # Index by evidence_id
             evidence_id = record.get('evidence_id', '')
             if evidence_id:
                 self._evidence_by_id[evidence_id] = record
 
-            # Index by indicator
             indicator = record.get('indicator', {})
             indicator_id = indicator.get('indicator_id', '')
             if indicator_id:
-                if indicator_id not in self._evidence_by_indicator:
-                    self._evidence_by_indicator[indicator_id] = []
-                self._evidence_by_indicator[indicator_id].append(record)
+                self._evidence_by_indicator.setdefault(indicator_id, []).append(record)
 
-            # Index by performance dimension
             performance = record.get('performance', {})
             dimension_id = performance.get('dimension_id', '')
             if dimension_id:
-                if dimension_id not in self._evidence_by_dimension:
-                    self._evidence_by_dimension[dimension_id] = []
-                self._evidence_by_dimension[dimension_id].append(record)
+                self._evidence_by_dimension.setdefault(dimension_id, []).append(record)
+
+            subdimension_id = performance.get('subdimension_id', '')
+            if subdimension_id and subdimension_id not in ('PRS_NA', ''):
+                self._evidence_by_subdimension.setdefault(subdimension_id, []).append(record)
+
+        # Build context → evidence mapping
+        contexts = self.context if isinstance(self.context, list) else []
+        for ctx in contexts:
+            for rid in ctx.get('linked_records', []):
+                if rid.startswith('SVCs_P_'):
+                    self._context_by_evidence[rid] = ctx
 
     def get_evidence_by_id(self, evidence_id: str) -> dict | None:
         """Get a single evidence record by its ID (O(1) lookup)."""
@@ -125,6 +125,73 @@ class KnowledgeBase:
                     results.append(record)
                     seen_ids.add(evidence_id)
         return results
+
+    def retrieve_evidence(
+        self,
+        dimensions: list[str],
+        subdimensions: list[str] | None = None,
+    ) -> list[dict]:
+        """Retrieve all evidence for target dimensions + subdimensions (no cap)."""
+        evds, seen = [], set()
+        for d in dimensions:
+            for e in self._evidence_by_dimension.get(d, []):
+                eid = e['evidence_id']
+                if eid not in seen:
+                    seen.add(eid)
+                    evds.append(e)
+        if subdimensions:
+            for sd in subdimensions:
+                for e in self._evidence_by_subdimension.get(sd, []):
+                    eid = e['evidence_id']
+                    if eid not in seen:
+                        seen.add(eid)
+                        evds.append(e)
+        return evds
+
+    @property
+    def context_by_evidence(self) -> dict[str, dict]:
+        return self._context_by_evidence
+
+    _CODEBOOK_PRIORITY = [
+        'A_indicators', 'A_categories',
+        'C_performance', 'C_subdimensions', 'C_outcome_types', 'C_theories',
+        'D_directions', 'D_significance', 'D_relationships',
+        'D_effect_size_types', 'D_stat_tests',
+        'B_methods', 'B_units', 'B_data_sources', 'B_tools',
+        'E_study_design', 'E_sample_units', 'E_settings', 'E_countries',
+        'K_climate', 'L_lcz', 'M_age_groups',
+        'F_quality',
+        'Z_semantic_layers', 'Z_spatial_layers', 'Z_morphological_attributes',
+        'G_pathways', 'H_subtypes',
+    ]
+
+    def get_codebook_subset(self, max_chars: int = 40000) -> dict:
+        """Extract a prompt-sized subset of the Encoding Dictionary."""
+        out: dict = {}
+        sz = 0
+        for name in self._CODEBOOK_PRIORITY:
+            table = self.appendix.get(name)
+            if not table or not isinstance(table, dict):
+                continue
+            simplified = {}
+            for code, entry in table.items():
+                if not isinstance(entry, dict):
+                    continue
+                item: dict = {
+                    "name": entry.get("name", code),
+                    "definition": entry.get("definition", "")[:200],
+                }
+                if name == "A_indicators":
+                    if entry.get("formula"):
+                        item["formula"] = entry["formula"][:150]
+                    if entry.get("category"):
+                        item["category"] = entry["category"]
+                simplified[code] = item
+            chunk = len(json.dumps(simplified, ensure_ascii=False))
+            if sz + chunk < max_chars:
+                out[name] = simplified
+                sz += chunk
+        return out
 
     def get_codebook_section(self, section: str) -> Optional[list[dict]]:
         """Get a section from the codebook/appendix"""
@@ -175,22 +242,22 @@ class KnowledgeBase:
         if country_id:
             results = [
                 r for r in results
-                if r.get('study', {}).get('country', {}).get('code', '') == country_id
+                if r.get('study_design', {}).get('country_id', '') == country_id
             ]
 
         if space_type_id:
             results = [
                 r for r in results
-                if r.get('study', {}).get('setting', {}).get('code', '') == space_type_id
+                if r.get('study_design', {}).get('setting_type_id', '') == space_type_id
             ]
 
         if min_confidence:
-            confidence_rank = {'CON_LOW': 0, 'CON_MED': 1, 'CON_HIGH': 2}
+            confidence_rank = {'CON_LOW': 0, 'CON_MED': 1, 'CON_HIG': 2}
             min_rank = confidence_rank.get(min_confidence, 0)
             results = [
                 r for r in results
                 if confidence_rank.get(
-                    r.get('quality', {}).get('confidence', {}).get('code', 'CON_LOW'), 0
+                    r.get('quality', {}).get('confidence_grade_id', 'CON_LOW'), 0
                 ) >= min_rank
             ]
 

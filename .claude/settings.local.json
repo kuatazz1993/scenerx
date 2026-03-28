@@ -17,7 +17,30 @@
       "Bash(cd /d/green-svc/greensvc/packages/frontend && npm run build 2>&1)",
       "Bash(cd:*)",
       "Bash(cd /d/green-svc/greensvc/packages/frontend && npx tsc --noEmit 2>&1)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.pytorch.org)",
+      "WebFetch(domain:discuss.pytorch.org)",
+      "Bash(cd /d/green-svc/greensvc/packages/backend && venv/Scripts/python -c \"import scipy; import sklearn; print\\('OK'\\)\" 2>&1)",
+      "Bash(cd /d/green-svc/greensvc/packages/backend && venv/Scripts/python -c \"from app.main import app; print\\('OK - app loaded'\\)\" 2>&1)",
+      "Bash(done)",
+      "Bash(cd D:/green-svc/greensvc/packages/frontend && npx tsc --noEmit 2>&1)",
+      "Bash(find:*)",
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(wc:*)",
+      "Bash(tasklist:*)",
+      "Bash(curl:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(npx tsc:*)",
+      "Bash(wmic process:*)",
+      "Bash(\"D:/green-svc/greensvc/packages/backend/venv/Scripts/pip.exe\" uninstall:*)",
+      "Bash(\"D:/green-svc/greensvc/packages/backend/venv/Scripts/pip.exe\" show:*)",
+      "Bash(\"D:/green-svc/greensvc/packages/backend/venv/Scripts/pip.exe\" list:*)",
+      "Bash(\"D:/green-svc/greensvc/packages/backend/venv/Scripts/pip.exe\" install:*)",
+      "Bash(npm install:*)",
+      "Bash(node:*)"
     ]
   }
 }

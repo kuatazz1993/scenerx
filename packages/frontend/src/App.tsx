@@ -95,7 +95,7 @@ function Sidebar() {
           textDecoration="none"
           _hover={{ color: 'brand.700' }}
         >
-          GreenSVC
+          SceneRx
         </Heading>
         <Text fontSize="2xs" color="gray.400" mt={0.5} letterSpacing="wide">
           Urban Greenspace Platform

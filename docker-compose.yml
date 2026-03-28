@@ -4,11 +4,11 @@ services:
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
-    container_name: greensvc-postgres
+    container_name: scenerx-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: greensvc
+      POSTGRES_DB: scenerx
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -22,7 +22,7 @@ services:
   # Redis for Celery
   redis:
     image: redis:7-alpine
-    container_name: greensvc-redis
+    container_name: scenerx-redis
     ports:
       - "6379:6379"
     volumes:
@@ -38,9 +38,9 @@ services:
     build:
       context: ./packages/backend
       dockerfile: Dockerfile
-    container_name: greensvc-backend
+    container_name: scenerx-backend
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/greensvc
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/scenerx
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - VISION_API_URL=${VISION_API_URL:-http://host.docker.internal:8000}
@@ -69,10 +69,10 @@ services:
     build:
       context: ./packages/backend
       dockerfile: Dockerfile
-    container_name: greensvc-celery-worker
+    container_name: scenerx-celery-worker
     command: celery -A app.core.celery_app worker --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/greensvc
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/scenerx
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - VISION_API_URL=${VISION_API_URL:-http://host.docker.internal:8000}
@@ -91,7 +91,7 @@ services:
     build:
       context: ./packages/frontend
       dockerfile: Dockerfile
-    container_name: greensvc-frontend
+    container_name: scenerx-frontend
     ports:
       - "3000:80"
     depends_on:

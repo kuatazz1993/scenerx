@@ -2,7 +2,8 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_gemini_client, get_knowledge_base
+from app.api.deps import get_gemini_client, get_knowledge_base, get_current_user
+from app.models.user import UserResponse
 from app.services.gemini_client import RecommendationService
 from app.services.knowledge_base import KnowledgeBase
 from app.models.indicator import (
@@ -19,6 +20,7 @@ async def recommend_indicators(
     request: RecommendationRequest,
     recommendation_service: RecommendationService = Depends(get_gemini_client),
     knowledge_base: KnowledgeBase = Depends(get_knowledge_base),
+    _user: UserResponse = Depends(get_current_user),
 ):
     """
     Get AI-powered indicator recommendations based on project context.

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Box,
@@ -26,14 +26,14 @@ import {
   TagLabel,
   Icon,
 } from '@chakra-ui/react';
-import { Download, FileText, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Download, FileText, FileImage, CheckCircle, AlertTriangle } from 'lucide-react';
 import useAppStore from '../store/useAppStore';
 import { generateReport } from '../utils/generateReport';
 import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
 import PageHeader from '../components/PageHeader';
 import EmptyState from '../components/EmptyState';
-import { RadarProfileChart, ZonePriorityChart, CorrelationHeatmap, IndicatorComparisonChart } from '../components/AnalysisCharts';
+import { RadarProfileChart, ZonePriorityChart, CorrelationHeatmap, IndicatorComparisonChart, PriorityHeatmap } from '../components/AnalysisCharts';
 
 function Reports() {
   const { projectId: routeProjectId } = useParams<{ projectId: string }>();
@@ -111,6 +111,45 @@ function Reports() {
     toast({ title: 'JSON exported', status: 'success' });
   };
 
+  const reportRef = useRef<HTMLDivElement>(null);
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (!reportRef.current) return;
+    toast({ title: 'Generating PDF...', status: 'info', duration: 2000 });
+    try {
+      const html2canvas = (await import('html2canvas')).default;
+      const { jsPDF } = await import('jspdf');
+
+      const canvas = await html2canvas(reportRef.current, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#FFFFFF',
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      const imgWidth = 210; // A4 width in mm
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      const pageHeight = 297; // A4 height in mm
+
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      let position = 0;
+
+      // Multi-page if content is taller than one page
+      while (position < imgHeight) {
+        if (position > 0) pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, -position, imgWidth, imgHeight);
+        position += pageHeight;
+      }
+
+      pdf.save(`${projectName.replace(/\s+/g, '_')}_report.pdf`);
+      toast({ title: 'PDF report downloaded', status: 'success' });
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+      toast({ title: 'PDF generation failed', status: 'error' });
+    }
+  }, [projectName, toast]);
+
   // Sort zone diagnostics by priority
   const sortedDiags = zoneAnalysisResult
     ? [...zoneAnalysisResult.zone_diagnostics].sort((a, b) => (a.rank || 999) - (b.rank || 999))
@@ -141,6 +180,15 @@ function Reports() {
           </Button>
           <Button
             size="sm"
+            leftIcon={<FileImage size={14} />}
+            onClick={handleDownloadPdf}
+            isDisabled={!hasAnalysis}
+            colorScheme="green"
+          >
+            Download PDF
+          </Button>
+          <Button
+            size="sm"
             leftIcon={<FileText size={14} />}
             onClick={handleExportJson}
             isDisabled={isEmpty}
@@ -157,7 +205,7 @@ function Reports() {
           description="Complete the pipeline steps (Vision → Indicators → Analysis) to generate a report. Navigate to your project to get started."
         />
       ) : (
-        <VStack spacing={6} align="stretch">
+        <VStack spacing={6} align="stretch" ref={reportRef}>
           {/* Pipeline Overview */}
           <Card>
             <CardHeader>
@@ -373,6 +421,18 @@ function Reports() {
               </CardHeader>
               <CardBody>
                 <ZonePriorityChart diagnostics={sortedDiags} />
+              </CardBody>
+            </Card>
+          )}
+
+          {/* Priority Heatmap */}
+          {sortedDiags.length > 0 && (
+            <Card>
+              <CardHeader>
+                <Heading size="md">Priority Heatmap</Heading>
+              </CardHeader>
+              <CardBody>
+                <PriorityHeatmap diagnostics={sortedDiags} layer="full" />
               </CardBody>
             </Card>
           )}

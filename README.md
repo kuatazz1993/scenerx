@@ -1,4 +1,4 @@
-# GreenSVC - Urban Greenspace Analysis Platform
+# SceneRx - Urban Greenspace Analysis Platform
 
 Automated urban greenspace performance analysis: upload site photos, run AI-powered segmentation, calculate environmental indicators, and generate design strategies.
 
@@ -53,7 +53,7 @@ Automated urban greenspace performance analysis: upload site photos, run AI-powe
 
 ## 部署
 
-GreenSVC 和 AI_City_View 是两个独立服务，分开部署。
+SceneRx 和 AI_City_View 是两个独立服务，分开部署。
 
 ### 首次安装
 
@@ -103,10 +103,10 @@ npm run build                    # 输出到 dist/
 ```nginx
 server {
     listen 80;
-    server_name greensvc.example.com;
+    server_name scenerx.example.com;
 
     location / {
-        root /var/www/greensvc/dist;
+        root /var/www/scenerx/dist;
         try_files $uri $uri/ /index.html;
     }
 

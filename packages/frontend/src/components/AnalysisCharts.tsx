@@ -266,6 +266,132 @@ export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatma
   );
 }
 
+// ─── Priority Heatmap (Zone × Indicator) ────────────────────────────────────
+
+const PRIORITY_COLORS: Record<string, string> = {
+  Excellent: '#276749',
+  Good: '#38A169',
+  Acceptable: '#68D391',
+  Moderate: '#ECC94B',
+  'Needs Attention': '#ED8936',
+  Critical: '#E53E3E',
+};
+
+function priorityCellColor(classification: string): string {
+  for (const [key, color] of Object.entries(PRIORITY_COLORS)) {
+    if (classification.toLowerCase() === key.toLowerCase()) return color;
+  }
+  return '#E2E8F0';
+}
+
+interface PriorityHeatmapProps {
+  diagnostics: ZoneDiagnostic[];
+  layer?: string;
+}
+
+export function PriorityHeatmap({ diagnostics, layer = 'full' }: PriorityHeatmapProps) {
+  const { zones, indicators, grid } = useMemo(() => {
+    const zoneList = diagnostics.map(d => d.zone_name);
+    const indSet = new Set<string>();
+    const gridMap: Record<string, Record<string, { classification: string; priority: number; value: number | null; z_score: number }>> = {};
+
+    for (const diag of diagnostics) {
+      gridMap[diag.zone_name] = {};
+      const status = diag.indicator_status || {};
+      for (const [indId, layerData] of Object.entries(status)) {
+        indSet.add(indId);
+        const ld = (layerData as Record<string, { classification?: string; priority?: number; value?: number | null; z_score?: number }>)[layer];
+        if (ld) {
+          gridMap[diag.zone_name][indId] = {
+            classification: ld.classification || '',
+            priority: ld.priority || 0,
+            value: ld.value ?? null,
+            z_score: ld.z_score || 0,
+          };
+        }
+      }
+    }
+    return { zones: zoneList, indicators: Array.from(indSet).sort(), grid: gridMap };
+  }, [diagnostics, layer]);
+
+  if (zones.length === 0 || indicators.length === 0) return null;
+
+  const cellW = Math.max(44, Math.min(56, 600 / Math.max(indicators.length, 1)));
+  const cellH = 36;
+  const labelW = 120;
+  const labelH = 90;
+  const svgW = labelW + indicators.length * cellW;
+  const svgH = labelH + zones.length * cellH + 30;
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {/* Column labels */}
+        {indicators.map((ind, ci) => (
+          <text
+            key={`col-${ind}`}
+            x={labelW + ci * cellW + cellW / 2}
+            y={labelH - 6}
+            textAnchor="end"
+            fontSize={9}
+            transform={`rotate(-45, ${labelW + ci * cellW + cellW / 2}, ${labelH - 6})`}
+          >
+            {ind.length > 12 ? ind.slice(0, 12) + '…' : ind}
+          </text>
+        ))}
+        {/* Rows */}
+        {zones.map((zone, ri) => (
+          <g key={zone}>
+            <text x={labelW - 6} y={labelH + ri * cellH + cellH / 2 + 4} textAnchor="end" fontSize={10}>
+              {zone.length > 14 ? zone.slice(0, 14) + '…' : zone}
+            </text>
+            {indicators.map((ind, ci) => {
+              const cell = grid[zone]?.[ind];
+              const cls = cell?.classification || '';
+              const zs = cell?.z_score ?? 0;
+              return (
+                <g key={`${zone}-${ind}`}>
+                  <rect
+                    x={labelW + ci * cellW}
+                    y={labelH + ri * cellH}
+                    width={cellW - 2}
+                    height={cellH - 2}
+                    rx={3}
+                    fill={priorityCellColor(cls)}
+                    opacity={0.85}
+                  >
+                    <title>{`${zone} × ${ind}: ${cls} (z=${zs.toFixed(2)})`}</title>
+                  </rect>
+                  <text
+                    x={labelW + ci * cellW + (cellW - 2) / 2}
+                    y={labelH + ri * cellH + (cellH - 2) / 2 + 4}
+                    textAnchor="middle"
+                    fontSize={9}
+                    fill="#fff"
+                    fontWeight="bold"
+                    pointerEvents="none"
+                  >
+                    {cell?.priority ?? ''}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        ))}
+        {/* Legend */}
+        <g transform={`translate(${labelW}, ${svgH - 22})`}>
+          {Object.entries(PRIORITY_COLORS).map(([label, color], i) => (
+            <g key={label} transform={`translate(${i * 90}, 0)`}>
+              <rect width={12} height={12} fill={color} rx={2} opacity={0.85} />
+              <text x={16} y={10} fontSize={8} fill="#4A5568">{label}</text>
+            </g>
+          ))}
+        </g>
+      </svg>
+    </Box>
+  );
+}
+
 // ─── Indicator Comparison Grouped Bar ───────────────────────────────────────
 
 interface IndicatorComparisonChartProps {

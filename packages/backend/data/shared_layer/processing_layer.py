@@ -1,7 +1,9 @@
 """
-GreenSVC Stage 2.5 - PROCESSING LAYER（处理层）
+SceneRx Stage 2.5 - PROCESSING LAYER（处理层）
 ================================================
 🔒 完全统一，所有指标共用，无需修改
+
+更新: 新增 image_id 推导和 lat/lng 元数据注入
 
 功能:
 1. process_zone() - 处理单个区域的所有图片
@@ -11,6 +13,7 @@ GreenSVC Stage 2.5 - PROCESSING LAYER（处理层）
 依赖变量（来自 INPUT LAYER）:
 - query_data: 项目和区域信息
 - zone_image_map: 各区域各图层的图片列表
+- image_metadata: {image_id: {lat, lng, ...}} 图片元数据（可选）
 - PATHS: 路径配置
 - LAYERS: 图层列表
 
@@ -33,7 +36,8 @@ from typing import Dict, List, Any
 # 1. PROCESS ZONE FUNCTION
 # =============================================================================
 def process_zone(zone: Dict, zone_images: Dict[str, List[str]], 
-                 base_path: str, calculator_func) -> Dict:
+                 base_path: str, calculator_func,
+                 image_metadata: Dict[str, Dict] = None) -> Dict:
     """
     处理单个区域的所有图片。
     
@@ -45,6 +49,7 @@ def process_zone(zone: Dict, zone_images: Dict[str, List[str]],
         zone_images: {layer: [filenames]}，该区域各图层的图片列表
         base_path: mask文件夹根路径
         calculator_func: calculate_indicator 函数引用
+        image_metadata: {image_id: {lat, lng, ...}} 图片元数据（可选）
         
     Returns:
         区域处理结果字典，包含：
@@ -57,9 +62,13 @@ def process_zone(zone: Dict, zone_images: Dict[str, List[str]],
         - images_no_data: 无有效数据的图片数
         
     Example:
-        >>> result = process_zone(zone, zone_images, '/path/to/mask', calculate_indicator)
+        >>> result = process_zone(zone, zone_images, '/path/to/mask', 
+        ...                       calculate_indicator, image_metadata)
         >>> print(f"Processed {result['images_processed']} images")
     """
+    if image_metadata is None:
+        image_metadata = {}
+    
     zone_id = zone['id']
     
     results = {
@@ -85,16 +94,27 @@ def process_zone(zone: Dict, zone_images: Dict[str, List[str]],
         for filename in filenames:
             image_path = os.path.join(base_path, zone_id, layer, filename)
             
+            # 从文件名推导 image_id（去掉扩展名）
+            image_id = os.path.splitext(filename)[0]
+            
             # 调用 CALCULATOR 层的计算函数
             result = calculator_func(image_path)
             
             if result['success']:
-                # 构建图片结果
+                # 构建图片结果：以 image_id 为首要标识
                 image_data = {
+                    'image_id': image_id,
                     'filename': filename,
                     'value': result['value']
                 }
-                # 添加额外字段（如 target_pixels, class_breakdown 等）
+                
+                # 注入经纬度等元数据（如果有）
+                meta = image_metadata.get(image_id, {})
+                for meta_key, meta_val in meta.items():
+                    image_data[meta_key] = meta_val
+                
+                # 添加 calculator 返回的额外字段
+                # （如 target_pixels, total_pixels, class_breakdown 等）
                 for key, val in result.items():
                     if key not in ['success', 'value', 'error']:
                         image_data[key] = val
@@ -184,6 +204,10 @@ def calculate_statistics(values: List[float]) -> Dict:
 print("\n" + "=" * 70)
 print(f"🔄 PROCESSING: {INDICATOR['id']} - {INDICATOR['name']}")
 print(f"   Layers: {', '.join(LAYERS)}")
+if image_metadata:
+    print(f"   Image metadata: {len(image_metadata)} entries loaded")
+else:
+    print(f"   Image metadata: not available (output will not include lat/lng)")
 print("=" * 70)
 
 # 初始化结果容器
@@ -199,12 +223,13 @@ for zone in query_data['zones']:
     
     print(f"\n📄 Processing: {zone['name']} ({total_zone_images} images)...")
     
-    # 处理该区域
+    # 处理该区域（传入 image_metadata）
     result = process_zone(
         zone=zone,
         zone_images=zone_images,
         base_path=PATHS['image_base_path'],
-        calculator_func=calculate_indicator
+        calculator_func=calculate_indicator,
+        image_metadata=image_metadata
     )
     
     all_zone_results.append(result)

@@ -1,6 +1,6 @@
-# GreenSVC Frontend
+# SceneRx Frontend
 
-React + TypeScript frontend for the GreenSVC urban greenspace analysis platform.
+React + TypeScript frontend for the SceneRx urban greenspace analysis platform.
 
 ## Tech Stack
 

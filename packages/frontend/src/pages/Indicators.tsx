@@ -46,12 +46,12 @@ import EmptyState from '../components/EmptyState';
 
 // Performance dimensions
 const DIMENSIONS = [
-  { id: 'PRF_AES', name: 'Visual Quality & Aesthetics' },
-  { id: 'PRF_BEH', name: 'Use & Behavior' },
-  { id: 'PRF_COM', name: 'Comfort' },
-  { id: 'PRF_ENV', name: 'Environment' },
-  { id: 'PRF_HLT', name: 'Health & Wellbeing' },
-  { id: 'PRF_SOC', name: 'Social' },
+  { id: 'PRF_AES', name: 'Aesthetics & Landscape Preference' },
+  { id: 'PRF_RST', name: 'Stress Relief & Restoration' },
+  { id: 'PRF_EMO', name: 'Emotion & Cognition' },
+  { id: 'PRF_THR', name: 'Thermal Comfort' },
+  { id: 'PRF_USE', name: 'Spatial Use & Activity' },
+  { id: 'PRF_SOC', name: 'Social Interaction' },
 ];
 
 function Indicators() {
@@ -92,7 +92,13 @@ function Indicators() {
     try {
       const result = await recommendMutation.mutateAsync({
         project_name: projectName,
+        project_location: activeProject?.project_location || '',
+        space_type_id: activeProject?.space_type_id || '',
+        koppen_zone_id: activeProject?.koppen_zone_id || '',
+        lcz_type_id: activeProject?.lcz_type_id || '',
+        age_group_id: activeProject?.age_group_id || '',
         performance_dimensions: selectedDimensions,
+        subdimensions: activeProject?.subdimensions || [],
         design_brief: designBrief,
       });
 
@@ -273,12 +279,22 @@ function Indicators() {
                             {rec.rank > 0 && (
                               <Badge colorScheme="purple">#{rec.rank}</Badge>
                             )}
-                            <Badge colorScheme={rec.relationship_direction === 'positive' ? 'green' : 'orange'}>
+                            <Badge colorScheme={rec.relationship_direction === 'positive' || rec.relationship_direction === 'INCREASE' ? 'green' : 'orange'}>
                               {rec.relationship_direction}
                             </Badge>
+                            {rec.strength_score && (
+                              <Badge colorScheme={rec.strength_score === 'A' ? 'green' : rec.strength_score === 'B' ? 'blue' : 'gray'}>
+                                Strength {rec.strength_score}
+                              </Badge>
+                            )}
                             <Badge colorScheme={rec.confidence === 'high' ? 'green' : 'yellow'}>
                               {rec.confidence} confidence
                             </Badge>
+                            {rec.transferability_summary && (
+                              <Badge colorScheme="teal" variant="outline">
+                                Transfer: {rec.transferability_summary.high_count}H/{rec.transferability_summary.moderate_count}M/{rec.transferability_summary.low_count}L
+                              </Badge>
+                            )}
                           </HStack>
 
                           {/* Evidence citations */}

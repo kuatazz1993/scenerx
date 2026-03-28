@@ -38,9 +38,8 @@ import {
   Eye,
   Footprints,
   Thermometer,
-  DollarSign,
-  Leaf,
   Heart,
+  Brain,
   Users,
   ChevronUp,
   ChevronDown,
@@ -132,13 +131,12 @@ const AGE_GROUPS = [
 ];
 
 const PERFORMANCE_DIMENSIONS = [
-  { id: 'PRF_AES', name: 'Visual-Spatial Quality', icon: Eye, desc: 'Aesthetic quality and spatial legibility' },
-  { id: 'PRF_BEH', name: 'Use, Accessibility & Safety', icon: Footprints, desc: 'Use patterns, accessibility, safety' },
-  { id: 'PRF_COM', name: 'Comfort', icon: Thermometer, desc: 'Thermal and composite comfort' },
-  { id: 'PRF_ECO', name: 'Economic Value', icon: DollarSign, desc: 'Financial value and economic return' },
-  { id: 'PRF_ENV', name: 'Environmental Quality', icon: Leaf, desc: 'Air quality and environmental measures' },
-  { id: 'PRF_HLT', name: 'Health & Wellbeing', icon: Heart, desc: 'Physical and psychological health' },
-  { id: 'PRF_SOC', name: 'Social Outcomes & Equity', icon: Users, desc: 'Social interaction and equity' },
+  { id: 'PRF_AES', name: 'Environmental Aesthetics & Landscape Preference', icon: Eye, desc: 'Beauty, attractiveness, visual comfort, naturalness' },
+  { id: 'PRF_RST', name: 'Stress Relief & Psychological Restoration', icon: Heart, desc: 'Physiological stress responses, restoration-related recovery' },
+  { id: 'PRF_EMO', name: 'Emotion Regulation & Cognitive Modulation', icon: Brain, desc: 'Positive affect, mood, attentional recovery, cognitive modulation' },
+  { id: 'PRF_THR', name: 'Microclimate Perception & Thermal Comfort', icon: Thermometer, desc: 'Pedestrian-level heat conditions, thermal comfort' },
+  { id: 'PRF_USE', name: 'Spatial Use & Physical Activity', icon: Footprints, desc: 'Walking, cycling, dwell time, activity/health outcomes' },
+  { id: 'PRF_SOC', name: 'Social Interaction & Lingering', icon: Users, desc: 'Collective dwelling, interaction, perceived safety, social vitality' },
 ];
 
 const DEFAULT_ZONE_TYPES = [

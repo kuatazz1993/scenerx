@@ -139,7 +139,7 @@ class ProjectQuery(BaseModel):
             query_metadata={
                 "query_version": "2.0",
                 "generated_at": datetime.now().isoformat(),
-                "system": "GreenSVC-AI"
+                "system": "SceneRx-AI"
             },
             project={
                 "name": project.project_name,

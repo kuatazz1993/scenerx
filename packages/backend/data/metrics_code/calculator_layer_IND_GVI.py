@@ -1,5 +1,5 @@
 """
-GreenSVC Stage 2.5 - Calculator Layer
+SceneRx Stage 2.5 - Calculator Layer
 ================================================
 Indicator ID: IND_GVI
 Indicator Name: Green View Index

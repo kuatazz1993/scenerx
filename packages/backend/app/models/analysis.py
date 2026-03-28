@@ -97,10 +97,47 @@ class ComputationMetadata(BaseModel):
     """Metadata about the Stage 2.5 computation."""
     version: str = "2.5"
     generated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
-    system: str = "GreenSVC-AI Stage 2.5"
+    system: str = "SceneRx-AI Stage 2.5"
     n_indicators: int = 0
     n_zones: int = 0
+    n_segments: int = 0
     layers: list[str] = Field(default_factory=lambda: ["full", "foreground", "middleground", "background"])
+    has_spatial_data: bool = False
+    has_clustering: bool = False
+
+
+class ArchetypeProfile(BaseModel):
+    """Profile for one KMeans cluster archetype."""
+    archetype_id: int
+    archetype_label: str = ""
+    point_count: int = 0
+    centroid_values: dict[str, float] = Field(default_factory=dict)
+    centroid_z_scores: dict[str, float] = Field(default_factory=dict)
+
+
+class SpatialSegment(BaseModel):
+    """A spatial segment: one cluster of geo-located image points."""
+    segment_id: str
+    archetype_id: int
+    archetype_label: str = ""
+    point_count: int = 0
+    point_ids: list[str] = Field(default_factory=list)
+    lat_range: list[float] = Field(default_factory=list)
+    lng_range: list[float] = Field(default_factory=list)
+    centroid_indicators: dict[str, float] = Field(default_factory=dict)
+    centroid_z_scores: dict[str, float] = Field(default_factory=dict)
+    silhouette_score: float = 0.0
+
+
+class ClusteringResult(BaseModel):
+    """Full clustering output: method, archetypes, spatial segments."""
+    method: str = "KMeans + KNN spatial smoothing"
+    k: int = 0
+    silhouette_score: float = 0.0
+    spatial_smooth_k: int = 7
+    layer_used: str = "full"
+    archetype_profiles: list[ArchetypeProfile] = Field(default_factory=list)
+    spatial_segments: list[SpatialSegment] = Field(default_factory=list)
 
 
 class ZoneAnalysisResult(BaseModel):
@@ -113,6 +150,9 @@ class ZoneAnalysisResult(BaseModel):
     layer_statistics: dict[str, dict] = Field(default_factory=dict)
     radar_profiles: dict[str, dict[str, float]] = Field(default_factory=dict)
     computation_metadata: ComputationMetadata = Field(default_factory=ComputationMetadata)
+    # Clustering (optional — requires geo-located image points with ≥20 data points)
+    segment_diagnostics: list[ZoneDiagnostic] = Field(default_factory=list)
+    clustering: Optional[ClusteringResult] = None
 
 
 # ---------------------------------------------------------------------------

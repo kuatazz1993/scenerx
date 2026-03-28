@@ -1,5 +1,5 @@
 """
-GreenSVC Stage 2.5 - Calculator Layer
+SceneRx Stage 2.5 - Calculator Layer
 ================================================
 Indicator ID: IND_SVF_DEC
 Indicator Name: Sky View Factor Decrease

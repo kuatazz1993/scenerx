@@ -140,6 +140,25 @@ export interface IndicatorRelationship {
 export interface RecommendationSummary {
   key_findings: string[];
   evidence_gaps: string[];
+  transferability_caveats?: string[];
+  dimension_coverage?: { dimension_id: string; indicator_count: number; evidence_count: number }[];
+}
+
+export interface TransferabilitySummary {
+  high_count: number;
+  moderate_count: number;
+  low_count: number;
+  unknown_count: number;
+}
+
+export interface EvidenceSummary {
+  evidence_ids: string[];
+  inferential_count: number;
+  descriptive_count: number;
+  strength_score: string;
+  strongest_tier: string;
+  best_significance: string;
+  dominant_direction: string;
 }
 
 export interface IndicatorRecommendation {
@@ -152,6 +171,11 @@ export interface IndicatorRecommendation {
   rank: number;
   relationship_direction: string;
   confidence: string;
+  strength_score?: string;
+  evidence_summary?: EvidenceSummary;
+  transferability_summary?: TransferabilitySummary;
+  dimension_id?: string;
+  subdimension_id?: string;
 }
 
 export interface RecommendationResponse {

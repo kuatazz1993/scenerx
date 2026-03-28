@@ -5,45 +5,37 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 from app.models.user import Token, UserCreate, UserResponse
 from app.services.auth import AuthService, get_auth_service
+from app.api.deps import get_current_user  # centralised auth dependency
 
 router = APIRouter()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+# Auth routes (/me, /refresh) always enforce a real token regardless of
+# the AUTH_ENABLED toggle, so we use a strict scheme here.
+_strict_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+async def _strict_current_user(
+    token: str = Depends(_strict_oauth2),
     auth_service: AuthService = Depends(get_auth_service),
 ) -> UserResponse:
-    """Get the current authenticated user from JWT token."""
+    """Always-enforced auth — used only by /me and /refresh."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
     payload = auth_service.decode_token(token)
     if payload is None:
         raise credentials_exception
-
     user = auth_service.get_user_by_id(payload.sub)
     if user is None:
         raise credentials_exception
-
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user",
-        )
-
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user")
     return UserResponse(
-        id=user.id,
-        email=user.email,
-        username=user.username,
-        full_name=user.full_name,
-        is_active=user.is_active,
-        created_at=user.created_at,
-        updated_at=user.updated_at,
+        id=user.id, email=user.email, username=user.username,
+        full_name=user.full_name, is_active=user.is_active,
+        created_at=user.created_at, updated_at=user.updated_at,
     )
 
 
@@ -95,14 +87,14 @@ async def login(
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(current_user: UserResponse = Depends(get_current_user)):
+async def get_me(current_user: UserResponse = Depends(_strict_current_user)):
     """Get the current authenticated user."""
     return current_user
 
 
 @router.post("/refresh", response_model=Token)
 async def refresh_token(
-    current_user: UserResponse = Depends(get_current_user),
+    current_user: UserResponse = Depends(_strict_current_user),
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Refresh the access token."""

@@ -54,15 +54,22 @@ class Settings(BaseSettings):
     redis_db: int = 0
 
     # JWT Authentication
+    auth_enabled: bool = False  # Set True to enforce auth on all endpoints
     secret_key: str = "your-secret-key-change-in-production"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
     # PostgreSQL Database
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/greensvc"
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/scenerx"
 
     # SQLite (lightweight persistence)
-    sqlite_db_name: str = "greensvc.db"
+    sqlite_db_name: str = "scenerx.db"
+
+    # Knowledge base filenames (configurable via env)
+    kb_evidence_file: str = "SVCs_P_Evidence.json"
+    kb_appendix_file: str = "Encoding_Dictionary.json"
+    kb_context_file: str = "Transferability_Context.json"
+    kb_iom_file: str = "I_SVCs_Operations.json"
 
     # Paths (relative to backend/)
     data_dir: str = "data"

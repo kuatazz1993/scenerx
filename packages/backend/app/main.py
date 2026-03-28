@@ -1,5 +1,5 @@
 """
-GreenSVC API - FastAPI Application
+SceneRx API - FastAPI Application
 Urban greenspace visual analysis backend
 """
 
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     # Startup
     settings = get_settings()
     settings.ensure_directories()
-    logger.info("GreenSVC API starting up...")
+    logger.info("SceneRx API starting up...")
     logger.info(f"Data directory: {settings.data_path}")
     logger.info(f"Vision API URL: {settings.vision_api_url}")
 
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     store.close()
-    logger.info("GreenSVC API shutting down...")
+    logger.info("SceneRx API shutting down...")
 
 
 def create_app() -> FastAPI:
@@ -49,7 +49,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title="GreenSVC API",
+        title="SceneRx API",
         description="Urban greenspace visual analysis API",
         version="1.0.0",
         docs_url="/docs",

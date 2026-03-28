@@ -79,6 +79,7 @@ import {
   ZonePriorityChart,
   CorrelationHeatmap,
   IndicatorComparisonChart,
+  PriorityHeatmap,
 } from '../components/AnalysisCharts';
 
 const LAYERS = ['full', 'foreground', 'middleground', 'background'];
@@ -791,6 +792,18 @@ function Analysis() {
               </CardHeader>
               <CardBody>
                 <ZonePriorityChart diagnostics={sortedDiagnostics} />
+              </CardBody>
+            </Card>
+          )}
+
+          {/* Priority Heatmap */}
+          {sortedDiagnostics.length > 0 && (
+            <Card mb={6}>
+              <CardHeader>
+                <Heading size="sm">Priority Heatmap</Heading>
+              </CardHeader>
+              <CardBody>
+                <PriorityHeatmap diagnostics={sortedDiagnostics} layer="full" />
               </CardBody>
             </Card>
           )}

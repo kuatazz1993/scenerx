@@ -3,6 +3,7 @@ Metrics Library Management Service
 Manages metric definitions and calculator code
 """
 
+import ast
 import os
 import re
 import shutil
@@ -78,51 +79,34 @@ class MetricsManager:
         return self.calculators
 
     def parse_calculator_file(self, filepath: Path) -> Optional[CalculatorInfo]:
-        """Parse calculator file to extract INDICATOR definition"""
+        """Parse calculator file to extract INDICATOR definition.
+
+        Uses AST to safely evaluate the INDICATOR dict literal, falling back
+        to regex when AST parsing fails (e.g. dict values reference variables).
+        """
         try:
             content = filepath.read_text(encoding='utf-8')
 
             if 'INDICATOR' not in content:
                 return None
 
-            # Extract fields using regex
-            patterns = {
-                'id': r'"id"\s*:\s*"([^"]+)"',
-                'name': r'"name"\s*:\s*"([^"]+)"',
-                'unit': r'"unit"\s*:\s*"([^"]+)"',
-                'formula': r'"formula"\s*:\s*"([^"]+)"',
-                'target_direction': r'"target_direction"\s*:\s*"([^"]+)"',
-                'definition': r'"definition"\s*:\s*"([^"]+)"',
-                'calc_type': r'"calc_type"\s*:\s*"([^"]+)"',
-                'category': r'"category"\s*:\s*"([^"]+)"',
-            }
+            indicator_dict = self._extract_indicator_ast(content)
+            if indicator_dict is None:
+                indicator_dict = self._extract_indicator_regex(content)
 
-            extracted = {}
-            for key, pattern in patterns.items():
-                match = re.search(pattern, content)
-                if match:
-                    extracted[key] = match.group(1)
-
-            # Extract target_classes list
-            classes_match = re.search(r'"target_classes"\s*:\s*\[(.*?)\]', content, re.DOTALL)
-            target_classes = []
-            if classes_match:
-                classes_str = classes_match.group(1)
-                target_classes = re.findall(r'"([^"]+)"', classes_str)
-
-            if not extracted.get('id'):
+            if not indicator_dict or not indicator_dict.get('id'):
                 return None
 
             return CalculatorInfo(
-                id=extracted.get('id', ''),
-                name=extracted.get('name', ''),
-                unit=extracted.get('unit', ''),
-                formula=extracted.get('formula', ''),
-                target_direction=extracted.get('target_direction', ''),
-                definition=extracted.get('definition', ''),
-                category=extracted.get('category', ''),
-                calc_type=extracted.get('calc_type', ''),
-                target_classes=target_classes,
+                id=indicator_dict.get('id', ''),
+                name=indicator_dict.get('name', ''),
+                unit=indicator_dict.get('unit', ''),
+                formula=indicator_dict.get('formula', ''),
+                target_direction=indicator_dict.get('target_direction', ''),
+                definition=indicator_dict.get('definition', ''),
+                category=indicator_dict.get('category', ''),
+                calc_type=indicator_dict.get('calc_type', ''),
+                target_classes=indicator_dict.get('target_classes', []),
                 filepath=str(filepath),
                 filename=filepath.name,
             )
@@ -130,6 +114,47 @@ class MetricsManager:
         except Exception as e:
             logger.error(f"Failed to parse calculator file {filepath}: {e}")
             return None
+
+    @staticmethod
+    def _extract_indicator_ast(content: str) -> Optional[dict]:
+        """Extract INDICATOR dict using AST (safe, handles multi-line dicts)."""
+        try:
+            tree = ast.parse(content)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == 'INDICATOR':
+                            return ast.literal_eval(node.value)
+        except (SyntaxError, ValueError):
+            pass
+        return None
+
+    @staticmethod
+    def _extract_indicator_regex(content: str) -> Optional[dict]:
+        """Fallback: extract INDICATOR fields using regex patterns."""
+        patterns = {
+            'id': r'"id"\s*:\s*"([^"]+)"',
+            'name': r'"name"\s*:\s*"([^"]+)"',
+            'unit': r'"unit"\s*:\s*"([^"]+)"',
+            'formula': r'"formula"\s*:\s*"([^"]+)"',
+            'target_direction': r'"target_direction"\s*:\s*"([^"]+)"',
+            'definition': r'"definition"\s*:\s*"([^"]+)"',
+            'calc_type': r'"calc_type"\s*:\s*"([^"]+)"',
+            'category': r'"category"\s*:\s*"([^"]+)"',
+        }
+        extracted: dict = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, content)
+            if match:
+                extracted[key] = match.group(1)
+
+        classes_match = re.search(r'"target_classes"\s*:\s*\[(.*?)\]', content, re.DOTALL)
+        if classes_match:
+            extracted['target_classes'] = re.findall(r'"([^"]+)"', classes_match.group(1))
+        else:
+            extracted['target_classes'] = []
+
+        return extracted if extracted.get('id') else None
 
     def get_all_calculators(self) -> list[CalculatorInfo]:
         """Get all calculator info as list"""

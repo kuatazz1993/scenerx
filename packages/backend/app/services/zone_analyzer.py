@@ -57,10 +57,23 @@ class ZoneAnalyzer:
         # 2) Z-scores per layer
         zscore_by_layer: dict[str, pd.DataFrame] = {}
         for layer, df_raw in raw_by_layer.items():
+            # Guard: drop columns that are entirely NaN (StandardScaler would crash)
+            all_nan_cols = df_raw.columns[df_raw.isna().all()]
+            if len(all_nan_cols) > 0:
+                logger.warning("Layer '%s': dropping %d all-NaN columns: %s", layer, len(all_nan_cols), list(all_nan_cols))
+            df_valid = df_raw.drop(columns=all_nan_cols)
+            if df_valid.empty:
+                zscore_by_layer[layer] = pd.DataFrame(0.0, index=df_raw.index, columns=df_raw.columns)
+                continue
             scaler = StandardScaler()
-            filled = df_raw.fillna(df_raw.mean()).infer_objects(copy=False)
+            filled = df_valid.fillna(df_valid.mean()).infer_objects(copy=False)
             scaled = scaler.fit_transform(filled)
-            zscore_by_layer[layer] = pd.DataFrame(scaled, index=df_raw.index, columns=df_raw.columns)
+            z_df = pd.DataFrame(scaled, index=df_valid.index, columns=df_valid.columns)
+            # Re-add dropped all-NaN columns as 0.0 (neutral z-score)
+            for col in all_nan_cols:
+                z_df[col] = 0.0
+            # Restore original column order
+            zscore_by_layer[layer] = z_df.reindex(columns=df_raw.columns)
 
         # 3) Percentiles per layer
         pct_by_layer: dict[str, pd.DataFrame] = {
