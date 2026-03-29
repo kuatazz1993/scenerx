@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type { Project, CalculatorInfo, IndicatorRecommendation, IndicatorRelationship, RecommendationSummary, SemanticClass, ZoneAnalysisResult, DesignStrategyResult, ProjectPipelineResult } from '../types';
 
 export interface VisionMaskResult {
@@ -37,6 +38,13 @@ interface AppState {
   setDesignStrategyResult: (r: DesignStrategyResult | null) => void;
   pipelineResult: ProjectPipelineResult | null;
   setPipelineResult: (r: ProjectPipelineResult | null) => void;
+
+  // AI report
+  aiReport: string | null;
+  setAiReport: (r: string | null) => void;
+  aiReportMeta: Record<string, unknown> | null;
+  setAiReportMeta: (m: Record<string, unknown> | null) => void;
+
   clearPipelineResults: () => void;
 
   // Calculators
@@ -57,7 +65,7 @@ interface AppState {
   removeActiveTask: (taskId: string) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>()(persist((set) => ({
   // Current project
   currentProject: null,
   setCurrentProject: (project) => set({ currentProject: project }),
@@ -96,6 +104,13 @@ export const useAppStore = create<AppState>((set) => ({
   setDesignStrategyResult: (r) => set({ designStrategyResult: r }),
   pipelineResult: null,
   setPipelineResult: (r) => set({ pipelineResult: r }),
+
+  // AI report
+  aiReport: null,
+  setAiReport: (r) => set({ aiReport: r }),
+  aiReportMeta: null,
+  setAiReportMeta: (m) => set({ aiReportMeta: m }),
+
   clearPipelineResults: () => set({
     visionMaskResults: [],
     visionStatistics: null,
@@ -106,6 +121,8 @@ export const useAppStore = create<AppState>((set) => ({
     zoneAnalysisResult: null,
     designStrategyResult: null,
     pipelineResult: null,
+    aiReport: null,
+    aiReportMeta: null,
   }),
 
   // Calculators
@@ -130,6 +147,22 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       activeTasks: state.activeTasks.filter((id) => id !== taskId),
     })),
+}), {
+  name: 'scenerx-store',
+  partialize: (state) => ({
+    currentProject: state.currentProject,
+    selectedIndicators: state.selectedIndicators,
+    visionMaskResults: state.visionMaskResults,
+    visionStatistics: state.visionStatistics,
+    recommendations: state.recommendations,
+    indicatorRelationships: state.indicatorRelationships,
+    recommendationSummary: state.recommendationSummary,
+    zoneAnalysisResult: state.zoneAnalysisResult,
+    designStrategyResult: state.designStrategyResult,
+    pipelineResult: state.pipelineResult,
+    aiReport: state.aiReport,
+    aiReportMeta: state.aiReportMeta,
+  }),
 }));
 
 export default useAppStore;

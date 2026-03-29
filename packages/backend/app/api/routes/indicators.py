@@ -1,6 +1,9 @@
 """Indicator recommendation endpoints"""
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_gemini_client, get_knowledge_base, get_current_user
 from app.models.user import UserResponse
@@ -47,6 +50,40 @@ async def recommend_indicators(
         )
 
     return response
+
+
+@router.post("/recommend/stream")
+async def recommend_indicators_stream(
+    request: RecommendationRequest,
+    recommendation_service: RecommendationService = Depends(get_gemini_client),
+    knowledge_base: KnowledgeBase = Depends(get_knowledge_base),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Stream indicator recommendations via Server-Sent Events.
+
+    Events: status | chunk | result | error
+    """
+    if not recommendation_service.check_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM provider '{recommendation_service.llm.provider}' not configured",
+        )
+
+    async def event_generator():
+        async for event in recommendation_service.recommend_indicators_stream(
+            request, knowledge_base
+        ):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/definitions", response_model=list[dict])

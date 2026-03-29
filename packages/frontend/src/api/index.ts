@@ -150,6 +150,50 @@ export const api = {
       lcz_type_id?: string;
       age_group_id?: string;
     }) => apiClient.post<RecommendationResponse>('/api/indicators/recommend', request),
+
+    recommendStream: (
+      request: {
+        project_name: string;
+        performance_dimensions: string[];
+        subdimensions?: string[];
+        design_brief?: string;
+        project_location?: string;
+        space_type_id?: string;
+        koppen_zone_id?: string;
+        lcz_type_id?: string;
+        age_group_id?: string;
+      },
+      onEvent: (event: { type: string; text?: string; message?: string; data?: RecommendationResponse }) => void,
+    ) => {
+      const baseURL = apiClient.defaults.baseURL || '';
+      return fetch(`${baseURL}/api/indicators/recommend/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      }).then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.trim();
+            if (line.startsWith('data: ')) {
+              try { onEvent(JSON.parse(line.slice(6))); }
+              catch { /* skip malformed */ }
+            }
+          }
+        }
+      });
+    },
     getDefinitions: () => apiClient.get<unknown[]>('/api/indicators/definitions'),
     getDimensions: () => apiClient.get<unknown[]>('/api/indicators/dimensions'),
     getSubdimensions: () => apiClient.get<unknown[]>('/api/indicators/subdimensions'),

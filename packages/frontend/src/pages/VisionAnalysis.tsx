@@ -609,7 +609,7 @@ function VisionAnalysis() {
                   </HStack>
                 </HStack>
               </CardHeader>
-              <CardBody>
+              <CardBody maxH="520px" overflowY="auto">
                 <VStack align="stretch" spacing={4}>
                   {maskResults.map(({ imageId, maskPaths }) => {
                     // For panorama entries like "img1_left", parse the view suffix

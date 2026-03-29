@@ -383,6 +383,7 @@ export interface ClusteringResult {
   method: string;
   k: number;
   silhouette_score: number;
+  silhouette_scores: { k: number; silhouette: number }[];
   spatial_smooth_k: number;
   layer_used: string;
   archetype_profiles: ArchetypeProfile[];
@@ -536,6 +537,7 @@ export interface ProjectPipelineResult {
   calculations_run: number;
   calculations_succeeded: number;
   calculations_failed: number;
+  calculations_cached: number;
   zone_statistics_count: number;
   zone_analysis: ZoneAnalysisResult | null;
   design_strategies: DesignStrategyResult | null;

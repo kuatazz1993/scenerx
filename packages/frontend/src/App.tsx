@@ -176,7 +176,7 @@ function App() {
             <Sidebar />
 
             {/* Main content area */}
-            <Box ml={SIDEBAR_W} flex={1} minH="100vh">
+            <Box ml={SIDEBAR_W} flex={1} minH="100vh" minW={0} overflow="hidden">
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/projects" element={<Projects />} />

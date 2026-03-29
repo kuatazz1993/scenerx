@@ -319,6 +319,7 @@ async def run_project_pipeline(
     calc_run = 0
     calc_ok = 0
     calc_fail = 0
+    calc_cached = 0
 
     for img in assigned_images:
         # Prefer semantic_map mask over raw photo
@@ -326,7 +327,9 @@ async def run_project_pipeline(
 
         for ind_id in valid_ids:
             # Full layer
-            if ind_id not in img.metrics_results:
+            if ind_id in img.metrics_results:
+                calc_cached += 1
+            else:
                 calc_run += 1
                 try:
                     result = calculator.calculate(ind_id, image_path)
@@ -345,23 +348,27 @@ async def run_project_pipeline(
                 layer_key = f"{ind_id}__{layer}"
                 mask_name = f"{layer}_map"
                 mask_path = img.mask_filepaths.get(mask_name)
-                if mask_path and layer_key not in img.metrics_results:
-                    calc_run += 1
-                    try:
-                        result = calculator.calculate_for_layer(
-                            ind_id,
-                            image_path,
-                            mask_path,
-                        )
-                        if result.success and result.value is not None:
-                            img.metrics_results[layer_key] = result.value
-                            calc_ok += 1
-                        else:
-                            calc_fail += 1
-                            logger.warning("Layer calc failed for %s/%s on %s: %s", ind_id, layer, img.image_id, result.error)
-                    except Exception as e:
+                if not mask_path:
+                    continue
+                if layer_key in img.metrics_results:
+                    calc_cached += 1
+                    continue
+                calc_run += 1
+                try:
+                    result = calculator.calculate_for_layer(
+                        ind_id,
+                        image_path,
+                        mask_path,
+                    )
+                    if result.success and result.value is not None:
+                        img.metrics_results[layer_key] = result.value
+                        calc_ok += 1
+                    else:
                         calc_fail += 1
-                        logger.error("Layer calc exception %s/%s on %s: %s", ind_id, layer, img.image_id, e)
+                        logger.warning("Layer calc failed for %s/%s on %s: %s", ind_id, layer, img.image_id, result.error)
+                except Exception as e:
+                    calc_fail += 1
+                    logger.error("Layer calc exception %s/%s on %s: %s", ind_id, layer, img.image_id, e)
 
     # Persist calculated metrics to SQLite
     if calc_ok > 0:
@@ -370,7 +377,7 @@ async def run_project_pipeline(
     steps.append(ProjectPipelineProgress(
         step="run_calculations",
         status="completed" if calc_ok > 0 or calc_run == 0 else "failed",
-        detail=f"Ran {calc_run} calculations: {calc_ok} succeeded, {calc_fail} failed",
+        detail=f"Ran {calc_run} new, {calc_cached} cached: {calc_ok} succeeded, {calc_fail} failed",
     ))
 
     # 5. Aggregate
@@ -462,6 +469,7 @@ async def run_project_pipeline(
         calculations_run=calc_run,
         calculations_succeeded=calc_ok,
         calculations_failed=calc_fail,
+        calculations_cached=calc_cached,
         zone_statistics_count=len(zone_statistics),
         zone_analysis=zone_result,
         design_strategies=design_result,

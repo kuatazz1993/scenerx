@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
 
     # Model names (per provider)
-    gemini_model: str = "gemini-3-pro-preview"
+    gemini_model: str = "gemini-2.5-flash"
     openai_model: str = "gpt-4o"
     anthropic_model: str = "claude-sonnet-4-20250514"
     deepseek_model: str = "deepseek-chat"
@@ -129,3 +129,34 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance"""
     return Settings()
+
+
+def update_env_file(updates: dict[str, str]) -> None:
+    """Update key=value pairs in the .env file, preserving comments and order.
+
+    Existing keys are updated in-place; new keys are appended at the end.
+    """
+    env_path = Path(_find_env_file())
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+
+    remaining = dict(updates)  # keys still to write
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip blank / comment lines unchanged
+        if not stripped or stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        # Parse KEY=VALUE
+        if "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                new_lines.append(f"{key}={remaining.pop(key)}")
+                continue
+        new_lines.append(line)
+
+    # Append any keys that weren't found in the file
+    for key, value in remaining.items():
+        new_lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")

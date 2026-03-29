@@ -32,8 +32,8 @@ import PageHeader from '../components/PageHeader';
 const FALLBACK_MODELS: Record<string, { id: string; label: string }[]> = {
   gemini: [
     { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
-    { id: 'gemini-2.5-flash-preview-05-20', label: 'Gemini 2.5 Flash Preview' },
-    { id: 'gemini-2.5-pro-preview-06-05', label: 'Gemini 2.5 Pro Preview' },
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   ],
   openai: [
     { id: 'gpt-4o', label: 'GPT-4o (default)' },
@@ -313,7 +313,7 @@ function Settings() {
                     </Button>
                   </HStack>
                   <Text fontSize="xs" color="gray.500" mt={1}>
-                    Runtime only — not saved to .env file.
+                    Saved to .env file and persisted across restarts.
                   </Text>
                 </FormControl>
               )}

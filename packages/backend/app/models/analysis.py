@@ -134,6 +134,7 @@ class ClusteringResult(BaseModel):
     method: str = "KMeans + KNN spatial smoothing"
     k: int = 0
     silhouette_score: float = 0.0
+    silhouette_scores: list[dict] = Field(default_factory=list)  # [{k, silhouette}, ...]
     spatial_smooth_k: int = 7
     layer_used: str = "full"
     archetype_profiles: list[ArchetypeProfile] = Field(default_factory=list)
@@ -198,13 +199,13 @@ class MatchedIOM(BaseModel):
 class DesignStrategy(BaseModel):
     """One design strategy for a zone."""
     priority: int = 1
-    strategy_name: str = ""
+    strategy_name: Optional[str] = ""
     target_indicators: list[str] = Field(default_factory=list)
-    spatial_location: str = ""
+    spatial_location: Optional[str] = ""
     intervention: dict = Field(default_factory=dict)
     expected_effects: list[dict] = Field(default_factory=list)
-    confidence: str = ""
-    potential_tradeoffs: str = ""
+    confidence: Optional[str] = ""
+    potential_tradeoffs: Optional[str] = ""
     supporting_ioms: list[str] = Field(default_factory=list)
     # v5.0 — signature & evidence detail
     signatures: list[dict] = Field(default_factory=list)
@@ -319,6 +320,7 @@ class ProjectPipelineResult(BaseModel):
     calculations_run: int = 0
     calculations_succeeded: int = 0
     calculations_failed: int = 0
+    calculations_cached: int = 0
     zone_statistics_count: int = 0
     zone_analysis: Optional[ZoneAnalysisResult] = None
     design_strategies: Optional[DesignStrategyResult] = None

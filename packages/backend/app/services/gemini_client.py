@@ -1,7 +1,7 @@
 """
-Recommendation Service — Two-Agent Architecture
-Agent 1 (Evidence Assessor): per-indicator assessment cards
-Agent 2 (Ranker & Selector): rank, select top indicators, output final JSON
+Recommendation Service — Hybrid Architecture
+Assessment (formerly Agent 1): deterministic Python computation of per-indicator cards
+Agent 2 (Ranker & Selector):   LLM ranks, selects top indicators, outputs final JSON
 
 Transferability is pre-computed in Python — never delegated to LLM.
 """
@@ -29,94 +29,27 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Prompt templates
+# Constants
 # ---------------------------------------------------------------------------
 
-AGENT1_PROMPT = """\
-# SceneRx-AI Stage 1 — Agent 1: Evidence Assessor
+_TIER_RANK = {"TIR_T1": 0, "TIR_T2": 1, "TIR_T3": 2}
+_SIG_RANK = {"SIG_001": 0, "SIG_01": 1, "SIG_05": 2, "SIG_10": 3, "SIG_NS": 4, "SIG_NA": 5}
+_TRANS_RANK = {"high": 0, "moderate": 1, "low": 2, "unknown": 3}
 
-## Task
-You receive grouped evidence records organized by indicator. Each evidence
-record already has a pre-computed `_transferability` field — do NOT recompute
-it; simply count the values per indicator.
+MAX_EVIDENCE_PER_INDICATOR = 5
 
-For each indicator group, produce an "assessment card" summarizing evidence
-strength and transferability.
 
-## Project Profile
-- Climate: {project_climate}
-- LCZ: {project_lcz}
-- Setting: {project_setting}
-- User groups: {project_users}
-- Target dimensions: {target_dims}
-- Target subdimensions: {target_subdims}
-
-## Transferability
-Each evidence record already contains a `_transferability` field with:
-- climate_match, lcz_match, setting_match, user_group_match
-- overall: "high" | "moderate" | "low" | "unknown"
-
-Simply count the `overall` values per indicator for your assessment card.
-Do NOT recompute transferability — it was computed deterministically upstream.
-
-## Evidence Strength Criteria (priority order)
-1. evidence_tier_id: TIR_T1 > TIR_T2 > TIR_T3
-2. is_descriptive_statistic: false (inferential) > true (descriptive)
-3. framework_mapping_basis: "direct" > any proxy
-4. significance_id: SIG_001 > SIG_01 > SIG_05 > SIG_NS
-5. relationship.type_id: REL_REG/REL_MED (causal-leaning) > REL_COR > REL_DES
-
-## Strength Score Definition
-- **A**: >=2 inferential records, best tier TIR_T1 or TIR_T2, significance >= SIG_01,
-  at least one with framework_mapping_basis = "direct"
-- **B**: >=1 inferential record, best tier TIR_T2+, significance >= SIG_05
-- **C**: descriptive-only, or all evidence is TIR_T3, or no significance >= SIG_05
-
-## Input Data
-
-### Indicator Groups ({n_indicators} indicators, {n_evidence} total records)
-```json
-{indicator_data}
-```
-
-## Output
-Output a JSON array. One object per indicator:
-```json
-[
-  {{
-    "indicator_id": "IND_XXX",
-    "evidence_count": 5,
-    "inferential_count": 4,
-    "descriptive_count": 1,
-    "dominant_direction": "DIR_POS | DIR_NEG | DIR_MIX",
-    "strongest_tier": "TIR_T1 | TIR_T2 | TIR_T3",
-    "best_significance": "SIG_001 | SIG_01 | SIG_05 | SIG_NS",
-    "has_direct_mapping": true,
-    "transferability_summary": {{
-      "high_count": 2,
-      "moderate_count": 1,
-      "low_count": 0,
-      "unknown_count": 2
-    }},
-    "dimensions_covered": ["PRF_AES"],
-    "subdimensions_covered": ["PRS_AES_ATTR"],
-    "strength_score": "A | B | C",
-    "key_evidence_ids": ["SVCs_P_XXX", "SVCs_P_YYY"],
-    "assessment_note": "Brief 1-2 sentence summary"
-  }}
-]
-```
-
-Output valid JSON only. No markdown fences, no commentary.
-"""
+# ---------------------------------------------------------------------------
+# Agent 2 prompt template (only LLM call remaining)
+# ---------------------------------------------------------------------------
 
 AGENT2_PROMPT = """\
-# SceneRx-AI Stage 1 — Agent 2: Indicator Ranker & Selector
+# SceneRx-AI Stage 1 — Indicator Ranker & Selector
 
 ## Task
-You receive assessment cards from Agent 1, plus the Encoding Dictionary and
-the project profile. Select the top {max_recommendations} indicators and produce
-the final structured JSON output.
+You receive pre-computed assessment cards (per-indicator evidence summaries)
+plus the Encoding Dictionary and the project profile. Select the top
+{max_recommendations} indicators and produce the final structured JSON output.
 
 ## Project Profile
 - Name: {project_name}
@@ -217,7 +150,11 @@ Output valid JSON only.
 # ---------------------------------------------------------------------------
 
 class RecommendationService:
-    """Two-agent indicator recommendation service."""
+    """Hybrid indicator recommendation service.
+
+    Assessment cards are computed deterministically in Python.
+    Only the ranking / selection / rationale step uses the LLM.
+    """
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
@@ -228,6 +165,155 @@ class RecommendationService:
 
     def check_api_key(self) -> bool:
         return self.llm.check_connection()
+
+    # -- Assessment card builder (replaces Agent 1 LLM call) ----------------
+
+    @staticmethod
+    def _build_assessment_cards(
+        indicator_groups: dict[str, list[dict]],
+    ) -> list[dict]:
+        """Build per-indicator assessment cards deterministically."""
+        cards: list[dict] = []
+
+        for ind_id, evidence_list in indicator_groups.items():
+            total = len(evidence_list)
+
+            # --- counts ---
+            inferential = sum(
+                1 for e in evidence_list
+                if not e.get("is_descriptive_statistic", True)
+            )
+            descriptive = total - inferential
+
+            # --- directions ---
+            dirs = [
+                e.get("relationship", {}).get("direction_id", "")
+                for e in evidence_list
+            ]
+            dir_counts = Counter(d for d in dirs if d)
+            if not dir_counts:
+                dominant_dir = "DIR_MIX"
+            elif len(dir_counts) == 1:
+                dominant_dir = dir_counts.most_common(1)[0][0]
+            else:
+                top2 = dir_counts.most_common(2)
+                # If top direction has strict majority, use it; else MIX
+                dominant_dir = (
+                    top2[0][0]
+                    if top2[0][1] > top2[1][1]
+                    else "DIR_MIX"
+                )
+
+            # --- strongest tier ---
+            tiers = [
+                e.get("quality", {}).get("evidence_tier_id", "TIR_T3")
+                for e in evidence_list
+            ]
+            strongest_tier = min(tiers, key=lambda t: _TIER_RANK.get(t, 9))
+
+            # --- best significance ---
+            sigs = [
+                e.get("relationship", {}).get("statistical", {}).get("significance_id", "")
+                or e.get("relationship", {}).get("significance_id", "")
+                for e in evidence_list
+            ]
+            sigs = [s for s in sigs if s and s in _SIG_RANK]
+            best_sig = min(sigs, key=lambda s: _SIG_RANK[s]) if sigs else "SIG_NA"
+
+            # --- direct mapping ---
+            has_direct = any(
+                e.get("indicator", {}).get("framework_mapping_basis") == "direct"
+                for e in evidence_list
+            )
+
+            # --- transferability counts ---
+            trans_vals = [
+                e.get("_transferability", {}).get("overall", "unknown")
+                for e in evidence_list
+            ]
+            trans_counts = Counter(trans_vals)
+
+            # --- dimensions / subdimensions ---
+            dims = sorted({
+                e.get("performance", {}).get("dimension_id", "")
+                for e in evidence_list
+            } - {""})
+            subdims = sorted({
+                e.get("performance", {}).get("subdimension_id", "")
+                for e in evidence_list
+            } - {""})
+
+            # --- strength score (A / B / C) ---
+            best_tier_rank = _TIER_RANK.get(strongest_tier, 9)
+            best_sig_rank = _SIG_RANK.get(best_sig, 9)
+
+            if (
+                inferential >= 2
+                and best_tier_rank <= 1        # T1 or T2
+                and best_sig_rank <= 1         # SIG_001 or SIG_01
+                and has_direct
+            ):
+                strength = "A"
+            elif (
+                inferential >= 1
+                and best_tier_rank <= 1        # T2+
+                and best_sig_rank <= 2         # SIG_05+
+            ):
+                strength = "B"
+            else:
+                strength = "C"
+
+            # --- key evidence IDs (top by tier → significance → transferability) ---
+            ranked = sorted(
+                evidence_list,
+                key=lambda e: (
+                    _TIER_RANK.get(
+                        e.get("quality", {}).get("evidence_tier_id", ""), 9
+                    ),
+                    _SIG_RANK.get(
+                        (e.get("relationship", {}).get("statistical", {}).get("significance_id", "")
+                         or e.get("relationship", {}).get("significance_id", "")),
+                        9,
+                    ),
+                    _TRANS_RANK.get(
+                        e.get("_transferability", {}).get("overall", "unknown"), 9
+                    ),
+                ),
+            )
+            key_ids = [e["evidence_id"] for e in ranked[:5]]
+
+            # --- assessment note (template) ---
+            note = (
+                f"{inferential} inferential + {descriptive} descriptive records, "
+                f"strength {strength}, {dominant_dir}, "
+                f"transferability {trans_counts.get('high', 0)}H/"
+                f"{trans_counts.get('moderate', 0)}M/"
+                f"{trans_counts.get('low', 0)}L"
+            )
+
+            cards.append({
+                "indicator_id": ind_id,
+                "evidence_count": total,
+                "inferential_count": inferential,
+                "descriptive_count": descriptive,
+                "dominant_direction": dominant_dir,
+                "strongest_tier": strongest_tier,
+                "best_significance": best_sig,
+                "has_direct_mapping": has_direct,
+                "transferability_summary": {
+                    "high_count": trans_counts.get("high", 0),
+                    "moderate_count": trans_counts.get("moderate", 0),
+                    "low_count": trans_counts.get("low", 0),
+                    "unknown_count": trans_counts.get("unknown", 0),
+                },
+                "dimensions_covered": dims,
+                "subdimensions_covered": subdims,
+                "strength_score": strength,
+                "key_evidence_ids": key_ids,
+                "assessment_note": note,
+            })
+
+        return cards
 
     # -- JSON parsing -------------------------------------------------------
 
@@ -248,16 +334,40 @@ class RecommendationService:
         except json.JSONDecodeError:
             pass
 
-        # Auto-repair truncated JSON
-        repaired = text.rstrip().rstrip(',: \n\t"\'')
-        repaired += "]" * max(0, text.count("[") - text.count("]"))
-        repaired += "}" * max(0, text.count("{") - text.count("}"))
+        # Auto-repair truncated JSON: strip back to the last complete object
+        # then close all open brackets
+        repaired = text
+        # If truncated mid-string, close the string first
+        in_str = repaired.count('"') % 2 == 1
+        if in_str:
+            repaired += '"'
+        # Strip trailing partial tokens (comma, colon, partial key)
+        repaired = re.sub(r'[,:\s]*"?[^"{}[\]]*$', '', repaired)
+        # Close brackets/braces
+        repaired += "]" * max(0, repaired.count("[") - repaired.count("]"))
+        repaired += "}" * max(0, repaired.count("{") - repaired.count("}"))
         try:
             result = json.loads(repaired)
             logger.warning("JSON auto-repaired (truncation)")
             return result
         except json.JSONDecodeError:
             pass
+
+        # Aggressive repair: find the last complete top-level object in an array
+        last_obj = repaired.rfind("},")
+        if last_obj == -1:
+            last_obj = repaired.rfind("}")
+        if last_obj > 0 and repaired.lstrip().startswith("["):
+            truncated = repaired[:last_obj + 1] + "]"
+            try:
+                result = json.loads(truncated)
+                logger.warning(
+                    "JSON auto-repaired (truncated to last complete object, "
+                    "kept %d/%d chars)", last_obj + 2, len(text),
+                )
+                return result
+            except json.JSONDecodeError:
+                pass
 
         # Fallback: regex extract
         obj_match = re.search(r'\{\s*"recommended_indicators"[\s\S]*\}', text)
@@ -277,7 +387,7 @@ class RecommendationService:
         logger.error("Failed to parse LLM response: %s", text[:500])
         return None
 
-    # -- Agent calls --------------------------------------------------------
+    # -- LLM call -----------------------------------------------------------
 
     async def _call_agent(self, prompt: str, tag: str):
         """Send prompt to LLM, return parsed JSON."""
@@ -296,7 +406,12 @@ class RecommendationService:
         request: RecommendationRequest,
         knowledge_base: KnowledgeBase,
     ) -> RecommendationResponse:
-        """Two-agent recommendation pipeline."""
+        """Hybrid recommendation pipeline.
+
+        1. Retrieve & enrich evidence        (Python)
+        2. Build assessment cards             (Python — replaces old Agent 1)
+        3. LLM ranks, selects, writes output  (Agent 2)
+        """
         try:
             if not self.llm.check_connection():
                 return RecommendationResponse(
@@ -318,7 +433,7 @@ class RecommendationService:
                     error="No evidence found for the selected dimensions",
                 )
 
-            # ── 2. Pre-compute transferability (Python, NOT LLM) ──
+            # ── 2. Pre-compute transferability (Python) ──
             project_ctx = {
                 "koppen_zone_id": request.koppen_zone_id,
                 "lcz_type_id": request.lcz_type_id,
@@ -341,57 +456,14 @@ class RecommendationService:
                 len(matched), len(indicator_groups),
             )
 
-            # ── 4. Agent 1: Evidence Assessor ──
-            # Limit evidence per indicator to keep prompt manageable
-            MAX_EVIDENCE_PER_INDICATOR = 5
-            indicator_data = []
-            for ind_id, evds in indicator_groups.items():
-                evds_clean = [
-                    {k: v for k, v in e.items() if k != "_ctx"}
-                    for e in evds
-                ]
-                # Prioritise: high-transferability first, then by quality tier
-                evds_sorted = sorted(
-                    evds_clean,
-                    key=lambda e: (
-                        {"high": 0, "moderate": 1, "low": 2, "unknown": 3}.get(
-                            e.get("_transferability", {}).get("overall", "unknown"), 3
-                        ),
-                        {"TIR_T1": 0, "TIR_T2": 1, "TIR_T3": 2}.get(
-                            e.get("quality", {}).get("evidence_tier_id", ""), 2
-                        ),
-                    ),
-                )
-                indicator_data.append({
-                    "indicator_id": ind_id,
-                    "evidence_count": len(evds_clean),
-                    "evidence": evds_sorted[:MAX_EVIDENCE_PER_INDICATOR],
-                })
-
-            agent1_prompt = AGENT1_PROMPT.format(
-                project_climate=request.koppen_zone_id or "N/A",
-                project_lcz=request.lcz_type_id or "N/A",
-                project_setting=request.space_type_id or "N/A",
-                project_users=request.age_group_id or "N/A",
-                target_dims=json.dumps(request.performance_dimensions),
-                target_subdims=json.dumps(request.subdimensions),
-                n_indicators=len(indicator_data),
-                n_evidence=len(matched),
-                indicator_data=json.dumps(indicator_data, ensure_ascii=False),
+            # ── 4. Build assessment cards (Python, instant) ──
+            assessment_cards = self._build_assessment_cards(indicator_groups)
+            logger.info(
+                "Built %d assessment cards (Python)", len(assessment_cards),
             )
 
-            assessment_cards = await self._call_agent(agent1_prompt, "Agent 1: Assessor")
-            if not isinstance(assessment_cards, list):
-                logger.warning("Agent 1 returned non-list: %s", type(assessment_cards))
-                return RecommendationResponse(
-                    success=False,
-                    error="Agent 1 (Evidence Assessor) failed to produce valid output",
-                )
-
-            logger.info("Agent 1 produced %d assessment cards", len(assessment_cards))
-
-            # ── 5. Agent 2: Ranker & Selector ──
-            cb_subset = knowledge_base.get_codebook_subset()
+            # ── 5. LLM: Ranker & Selector ──
+            cb_subset = knowledge_base.get_codebook_for_cards(project_ctx)
 
             agent2_prompt = AGENT2_PROMPT.format(
                 project_name=request.project_name or "N/A",
@@ -409,12 +481,12 @@ class RecommendationService:
                 max_recommendations=request.max_recommendations,
             )
 
-            result = await self._call_agent(agent2_prompt, "Agent 2: Ranker")
+            result = await self._call_agent(agent2_prompt, "Ranker")
             if not isinstance(result, dict) or "recommended_indicators" not in result:
-                logger.warning("Agent 2 returned unexpected format")
+                logger.warning("Ranker returned unexpected format")
                 return RecommendationResponse(
                     success=False,
-                    error="Agent 2 (Ranker) failed to produce valid output",
+                    error="LLM Ranker failed to produce valid output",
                 )
 
             # ── 6. Parse into response models ──
@@ -423,6 +495,101 @@ class RecommendationService:
         except Exception as e:
             logger.error("Recommendation error: %s", e, exc_info=True)
             return RecommendationResponse(success=False, error=str(e))
+
+    # -- Streaming pipeline -------------------------------------------------
+
+    async def recommend_indicators_stream(
+        self,
+        request: RecommendationRequest,
+        knowledge_base: KnowledgeBase,
+    ):
+        """Same logic as recommend_indicators but yields SSE-style dicts.
+
+        Event types:
+          {"type": "status",  "message": "..."}
+          {"type": "chunk",   "text": "..."}
+          {"type": "result",  "data": { ... RecommendationResponse }}
+          {"type": "error",   "message": "..."}
+        """
+        try:
+            if not self.llm.check_connection():
+                yield {"type": "error", "message": f"LLM provider ({self.llm.provider}) not configured"}
+                return
+
+            if not knowledge_base.loaded:
+                knowledge_base.load()
+
+            yield {"type": "status", "message": "Retrieving evidence…"}
+
+            # ── 1-4: identical to non-streaming ──
+            matched = knowledge_base.retrieve_evidence(
+                request.performance_dimensions,
+                request.subdimensions or None,
+            )
+            if not matched:
+                yield {"type": "error", "message": "No evidence found for the selected dimensions"}
+                return
+
+            project_ctx = {
+                "koppen_zone_id": request.koppen_zone_id,
+                "lcz_type_id": request.lcz_type_id,
+                "space_type_id": request.space_type_id,
+                "age_group_id": request.age_group_id,
+            }
+            matched = enrich_evidence(matched, knowledge_base.context_by_evidence, project_ctx)
+
+            indicator_groups: dict[str, list[dict]] = defaultdict(list)
+            for e in matched:
+                indicator_groups[e["indicator"]["indicator_id"]].append(e)
+
+            assessment_cards = self._build_assessment_cards(indicator_groups)
+
+            yield {
+                "type": "status",
+                "message": f"Built {len(assessment_cards)} assessment cards from {len(matched)} evidence records",
+            }
+
+            # ── 5. LLM (streamed) ──
+            cb_subset = knowledge_base.get_codebook_for_cards(project_ctx)
+
+            agent2_prompt = AGENT2_PROMPT.format(
+                project_name=request.project_name or "N/A",
+                project_climate=request.koppen_zone_id or "N/A",
+                project_lcz=request.lcz_type_id or "N/A",
+                project_setting=request.space_type_id or "N/A",
+                project_users=request.age_group_id or "N/A",
+                design_brief=request.design_brief or "N/A",
+                target_dims=json.dumps(request.performance_dimensions),
+                target_subdims=json.dumps(request.subdimensions),
+                codebook=json.dumps(cb_subset, ensure_ascii=False),
+                cb_table_count=len(cb_subset),
+                n_cards=len(assessment_cards),
+                cards=json.dumps(assessment_cards, ensure_ascii=False),
+                max_recommendations=request.max_recommendations,
+            )
+
+            logger.info("Ranker (stream) — sending ~%d tokens", len(agent2_prompt) // 4)
+            yield {"type": "status", "message": "LLM is generating recommendations…"}
+
+            full_text = ""
+            async for chunk in self.llm.generate_stream(agent2_prompt):
+                full_text += chunk
+                yield {"type": "chunk", "text": chunk}
+
+            logger.info("Ranker (stream) — received %d chars", len(full_text))
+
+            # ── 6. Parse ──
+            result = self._parse_json(full_text)
+            if not isinstance(result, dict) or "recommended_indicators" not in result:
+                yield {"type": "error", "message": "LLM Ranker failed to produce valid output"}
+                return
+
+            response = self._build_response(result, len(matched))
+            yield {"type": "result", "data": response.model_dump()}
+
+        except Exception as e:
+            logger.error("Streaming recommendation error: %s", e, exc_info=True)
+            yield {"type": "error", "message": str(e)}
 
     # -- Response building --------------------------------------------------
 
@@ -475,7 +642,10 @@ class RecommendationService:
                 )
                 recommendations.append(rec)
             except Exception as e:
-                logger.warning("Failed to parse recommendation item: %s | item=%s", e, json.dumps(item, ensure_ascii=False)[:300])
+                logger.warning(
+                    "Failed to parse recommendation item: %s | item=%s",
+                    e, json.dumps(item, ensure_ascii=False)[:300],
+                )
 
         relationships: list[IndicatorRelationship] = []
         for rr in result.get("indicator_relationships", []):

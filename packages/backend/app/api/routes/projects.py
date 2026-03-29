@@ -240,12 +240,45 @@ async def upload_images(
         with open(filepath, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
+        # Extract EXIF GPS coordinates
+        has_gps = False
+        latitude = None
+        longitude = None
+        try:
+            from PIL import Image as PILImage
+            from PIL.ExifTags import TAGS, GPSTAGS
+
+            with PILImage.open(filepath) as img:
+                exif = img.getexif()
+                if exif:
+                    # GPS info is in IFD 0x8825
+                    gps_ifd = exif.get_ifd(0x8825)
+                    if gps_ifd:
+                        def _dms_to_dd(dms, ref):
+                            d, m, s = float(dms[0]), float(dms[1]), float(dms[2])
+                            dd = d + m / 60 + s / 3600
+                            return -dd if ref in ("S", "W") else dd
+
+                        lat_dms = gps_ifd.get(2)  # GPSLatitude
+                        lat_ref = gps_ifd.get(1)   # GPSLatitudeRef
+                        lng_dms = gps_ifd.get(4)  # GPSLongitude
+                        lng_ref = gps_ifd.get(3)   # GPSLongitudeRef
+                        if lat_dms and lng_dms and lat_ref and lng_ref:
+                            latitude = round(_dms_to_dd(lat_dms, lat_ref), 6)
+                            longitude = round(_dms_to_dd(lng_dms, lng_ref), 6)
+                            has_gps = True
+        except Exception:
+            pass  # Not an image with EXIF or Pillow issue — skip silently
+
         # Create image record
         image = UploadedImage(
             image_id=image_id,
             filename=file.filename,
             filepath=str(filepath),
             zone_id=zone_id,
+            has_gps=has_gps,
+            latitude=latitude,
+            longitude=longitude,
         )
         project.uploaded_images.append(image)
         uploaded.append(image)

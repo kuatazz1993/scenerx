@@ -86,7 +86,7 @@ class ClusteringService:
         X = scaler.fit_transform(df.values)
 
         # ── 3. Optimal K via silhouette ──
-        best_k, best_score, labels = self._find_optimal_k(X, max_k)
+        best_k, best_score, labels, silhouette_scores = self._find_optimal_k(X, max_k)
         logger.info("Optimal K=%d (silhouette=%.3f)", best_k, best_score)
 
         # ── 4. KNN spatial smoothing (if coordinates available) ──
@@ -113,6 +113,7 @@ class ClusteringService:
             method="KMeans + KNN spatial smoothing" if has_coords else "KMeans",
             k=best_k,
             silhouette_score=round(best_score, 4),
+            silhouette_scores=silhouette_scores,
             spatial_smooth_k=knn_k if has_coords else 0,
             layer_used=layer,
             archetype_profiles=archetypes,
@@ -162,20 +163,22 @@ class ClusteringService:
     def _find_optimal_k(
         X: np.ndarray,
         max_k: int,
-    ) -> tuple[int, float, np.ndarray]:
-        """Try K=2..max_k, pick best silhouette score."""
+    ) -> tuple[int, float, np.ndarray, list[dict]]:
+        """Try K=2..max_k, pick best silhouette score. Returns all scores."""
         n = len(X)
         upper = min(max_k, n - 1, 15)
         best_k, best_score, best_labels = 2, -1.0, np.zeros(n, dtype=int)
+        all_scores: list[dict] = []
 
         for k in range(2, upper + 1):
             km = KMeans(n_clusters=k, n_init=10, random_state=42)
             lbl = km.fit_predict(X)
             sc = silhouette_score(X, lbl)
+            all_scores.append({"k": k, "silhouette": round(float(sc), 4)})
             if sc > best_score:
                 best_k, best_score, best_labels = k, sc, lbl
 
-        return best_k, best_score, best_labels
+        return best_k, best_score, best_labels, all_scores
 
     @staticmethod
     def _knn_smooth(

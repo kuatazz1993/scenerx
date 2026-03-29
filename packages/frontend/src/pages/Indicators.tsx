@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Heading,
@@ -16,7 +16,6 @@ import {
   CheckboxGroup,
   Alert,
   AlertIcon,
-  /* useToast — replaced by useAppToast */
   Accordion,
   AccordionItem,
   AccordionButton,
@@ -32,11 +31,13 @@ import {
   ListItem,
   Collapse,
   useDisclosure,
+  Spinner,
 } from '@chakra-ui/react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { Lightbulb } from 'lucide-react';
-import { useKnowledgeBaseSummary, useRecommendIndicators, useProject } from '../hooks/useApi';
-import type { IndicatorRecommendation } from '../types';
+import { useKnowledgeBaseSummary, useProject } from '../hooks/useApi';
+import api from '../api';
+import type { IndicatorRecommendation, RecommendationResponse } from '../types';
 import useAppStore from '../store/useAppStore';
 import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
@@ -53,24 +54,123 @@ const DIMENSIONS = [
   { id: 'PRF_SOC', name: 'Social Interaction' },
 ];
 
+// ── Memoized recommendation row ──────────────────────────────────────────
+const RecommendationItem = memo(function RecommendationItem({
+  rec,
+  selected,
+  onToggle,
+}: {
+  rec: IndicatorRecommendation;
+  selected: boolean;
+  onToggle: (rec: IndicatorRecommendation) => void;
+}) {
+  const handleCheck = useCallback(
+    (e: React.MouseEvent) => { e.stopPropagation(); onToggle(rec); },
+    [rec, onToggle],
+  );
+
+  return (
+    <AccordionItem>
+      <AccordionButton>
+        <HStack flex="1" justify="space-between" pr={2}>
+          <HStack>
+            <Checkbox
+              isChecked={selected}
+              onChange={() => onToggle(rec)}
+              onClick={handleCheck}
+            />
+            <Badge colorScheme="blue">{rec.indicator_id}</Badge>
+            <Text fontWeight="bold" noOfLines={1}>{rec.indicator_name}</Text>
+          </HStack>
+          <HStack>
+            <Progress value={rec.relevance_score * 100} size="sm" w="60px" colorScheme="green" />
+            <Text fontSize="sm">{(rec.relevance_score * 100).toFixed(0)}%</Text>
+          </HStack>
+        </HStack>
+        <AccordionIcon />
+      </AccordionButton>
+      <AccordionPanel pb={4}>
+        <VStack align="stretch" spacing={3}>
+          <Text fontSize="sm">{rec.rationale}</Text>
+          <HStack flexWrap="wrap">
+            {rec.rank > 0 && <Badge colorScheme="purple">#{rec.rank}</Badge>}
+            <Badge colorScheme={rec.relationship_direction === 'positive' || rec.relationship_direction === 'INCREASE' ? 'green' : 'orange'}>
+              {rec.relationship_direction}
+            </Badge>
+            {rec.strength_score && (
+              <Badge colorScheme={rec.strength_score === 'A' ? 'green' : rec.strength_score === 'B' ? 'blue' : 'gray'}>
+                Strength {rec.strength_score}
+              </Badge>
+            )}
+            <Badge colorScheme={rec.confidence === 'high' ? 'green' : 'yellow'}>
+              {rec.confidence} confidence
+            </Badge>
+            {rec.transferability_summary && (
+              <Badge colorScheme="teal" variant="outline">
+                Transfer: {rec.transferability_summary.high_count}H/{rec.transferability_summary.moderate_count}M/{rec.transferability_summary.low_count}L
+              </Badge>
+            )}
+          </HStack>
+
+          {/* Evidence citations */}
+          {rec.evidence_citations && rec.evidence_citations.length > 0 ? (
+            <Box>
+              <Text fontSize="xs" fontWeight="bold" color="gray.600" mb={1}>Evidence Citations:</Text>
+              <VStack align="stretch" spacing={1}>
+                {rec.evidence_citations.map((cit) => (
+                  <HStack key={cit.evidence_id} fontSize="xs" color="gray.600" align="start" spacing={2}>
+                    <Badge size="sm" variant="outline" colorScheme="gray" flexShrink={0}>
+                      {cit.evidence_id}
+                    </Badge>
+                    <Text noOfLines={2} flex={1}>
+                      {cit.citation || 'No citation text'}
+                      {cit.year ? ` (${cit.year})` : ''}
+                    </Text>
+                    {cit.direction && (
+                      <Badge size="sm" colorScheme={cit.direction === 'positive' ? 'green' : 'orange'} flexShrink={0}>
+                        {cit.direction}
+                      </Badge>
+                    )}
+                  </HStack>
+                ))}
+              </VStack>
+            </Box>
+          ) : rec.evidence_ids.length > 0 ? (
+            <Text fontSize="xs" color="gray.500">
+              Evidence: {rec.evidence_ids.slice(0, 3).join(', ')}
+              {rec.evidence_ids.length > 3 && ` +${rec.evidence_ids.length - 3} more`}
+            </Text>
+          ) : null}
+        </VStack>
+      </AccordionPanel>
+    </AccordionItem>
+  );
+});
+
 function Indicators() {
   const { projectId: routeProjectId } = useParams<{ projectId: string }>();
   const { data: kbSummary, isLoading: kbLoading } = useKnowledgeBaseSummary();
   const { data: routeProject } = useProject(routeProjectId || '');
-  const recommendMutation = useRecommendIndicators();
   const toast = useAppToast();
 
   const { currentProject, selectedIndicators, addSelectedIndicator, removeSelectedIndicator, clearSelectedIndicators, recommendations, setRecommendations, indicatorRelationships, setIndicatorRelationships, recommendationSummary, setRecommendationSummary } = useAppStore();
 
   const activeProject = routeProject || currentProject;
 
+  // Streaming state
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState('');
+  const [streamingText, setStreamingText] = useState('');
+  const streamBoxRef = useRef<HTMLDivElement>(null);
+
+  // O(1) selection lookup
+  const selectedIds = useMemo(
+    () => new Set(selectedIndicators.map((i) => i.indicator_id)),
+    [selectedIndicators],
+  );
+
   // Advanced options toggle
   const { isOpen: advancedOpen, onToggle: toggleAdvanced } = useDisclosure();
-  const AdvancedToggle = () => (
-    <Button size="xs" variant="ghost" onClick={toggleAdvanced} rightIcon={advancedOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}>
-      {advancedOpen ? 'Hide' : 'Customize'}
-    </Button>
-  );
 
   // Form state — dimensions can be adjusted, rest comes from project
   const [selectedDimensions, setSelectedDimensions] = useState<string[]>([]);
@@ -84,6 +184,13 @@ function Indicators() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId]);
 
+  // Auto-scroll streaming box
+  useEffect(() => {
+    if (streamBoxRef.current) {
+      streamBoxRef.current.scrollTop = streamBoxRef.current.scrollHeight;
+    }
+  }, [streamingText]);
+
   // recommendations now from store (persisted across navigation)
 
   const handleRecommend = async () => {
@@ -93,48 +200,62 @@ function Indicators() {
       return;
     }
 
-    try {
-      const result = await recommendMutation.mutateAsync({
-        project_name: name,
-        project_location: activeProject?.project_location || '',
-        space_type_id: activeProject?.space_type_id || '',
-        koppen_zone_id: activeProject?.koppen_zone_id || '',
-        lcz_type_id: activeProject?.lcz_type_id || '',
-        age_group_id: activeProject?.age_group_id || '',
-        performance_dimensions: selectedDimensions,
-        subdimensions: activeProject?.subdimensions || [],
-        design_brief: activeProject?.design_brief || '',
-      });
+    setIsStreaming(true);
+    setStreamingText('');
+    setStreamStatus('Starting…');
 
-      if (result.success) {
-        setRecommendations(result.recommendations);
-        setIndicatorRelationships(result.indicator_relationships || []);
-        setRecommendationSummary(result.summary || null);
-        toast({
-          title: `Found ${result.recommendations.length} recommendations`,
-          description: `Reviewed ${result.total_evidence_reviewed} evidence records`,
-          status: 'success',
-        });
-      } else {
-        toast({ title: result.error || 'Recommendation failed', status: 'error' });
-      }
+    try {
+      await api.indicators.recommendStream(
+        {
+          project_name: name,
+          project_location: activeProject?.project_location || '',
+          space_type_id: activeProject?.space_type_id || '',
+          koppen_zone_id: activeProject?.koppen_zone_id || '',
+          lcz_type_id: activeProject?.lcz_type_id || '',
+          age_group_id: activeProject?.age_group_id || '',
+          performance_dimensions: selectedDimensions,
+          subdimensions: activeProject?.subdimensions || [],
+          design_brief: activeProject?.design_brief || '',
+        },
+        (event) => {
+          if (event.type === 'status') {
+            setStreamStatus(event.message || '');
+          } else if (event.type === 'chunk') {
+            setStreamingText((prev) => prev + (event.text || ''));
+          } else if (event.type === 'result') {
+            const result = event.data as unknown as RecommendationResponse;
+            setRecommendations(result.recommendations);
+            setIndicatorRelationships(result.indicator_relationships || []);
+            setRecommendationSummary(result.summary || null);
+            toast({
+              title: `Found ${result.recommendations.length} recommendations`,
+              description: `Reviewed ${result.total_evidence_reviewed} evidence records`,
+              status: 'success',
+            });
+          } else if (event.type === 'error') {
+            toast({ title: event.message || 'Recommendation failed', status: 'error' });
+          }
+        },
+      );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Recommendation failed';
       toast({ title: message, status: 'error' });
+    } finally {
+      setIsStreaming(false);
+      setStreamStatus('');
     }
   };
 
-  const isSelected = (indicatorId: string) => {
-    return selectedIndicators.some((i) => i.indicator_id === indicatorId);
-  };
-
-  const toggleIndicator = (indicator: IndicatorRecommendation) => {
-    if (isSelected(indicator.indicator_id)) {
-      removeSelectedIndicator(indicator.indicator_id);
-    } else {
-      addSelectedIndicator(indicator);
-    }
-  };
+  const toggleIndicator = useCallback(
+    (indicator: IndicatorRecommendation) => {
+      if (selectedIds.has(indicator.indicator_id)) {
+        removeSelectedIndicator(indicator.indicator_id);
+      } else {
+        addSelectedIndicator(indicator);
+      }
+    },
+    [selectedIds, addSelectedIndicator, removeSelectedIndicator],
+  );
 
   return (
     <PageShell isLoading={kbLoading} loadingText="Loading knowledge base...">
@@ -194,7 +315,9 @@ function Indicators() {
                     {selectedDimensions.length === 0 && <Text fontSize="xs" color="red.500">None selected</Text>}
                   </Wrap>
                 </VStack>
-                <AdvancedToggle />
+                <Button size="xs" variant="ghost" onClick={toggleAdvanced} rightIcon={advancedOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}>
+                  {advancedOpen ? 'Hide' : 'Customize'}
+                </Button>
               </HStack>
             </CardHeader>
             <Collapse in={advancedOpen} animateOpacity>
@@ -222,7 +345,8 @@ function Indicators() {
             colorScheme="blue"
             size="lg"
             onClick={handleRecommend}
-            isLoading={recommendMutation.isPending}
+            isLoading={isStreaming}
+            loadingText={streamStatus || 'Generating…'}
             isDisabled={!activeProject?.project_name || selectedDimensions.length === 0}
           >
             Get Recommendations
@@ -231,6 +355,35 @@ function Indicators() {
 
         {/* Right: Results */}
         <VStack spacing={6} align="stretch">
+          {/* Streaming output */}
+          {isStreaming && (
+            <Card borderColor="blue.200" borderWidth={1}>
+              <CardHeader pb={2}>
+                <HStack>
+                  <Spinner size="sm" color="blue.400" />
+                  <Text fontSize="sm" fontWeight="bold" color="blue.600">{streamStatus || 'Generating…'}</Text>
+                </HStack>
+              </CardHeader>
+              {streamingText && (
+                <CardBody pt={0}>
+                  <Box
+                    ref={streamBoxRef}
+                    maxH="300px"
+                    overflowY="auto"
+                    bg="gray.50"
+                    p={3}
+                    borderRadius="md"
+                    fontSize="xs"
+                    fontFamily="mono"
+                    whiteSpace="pre-wrap"
+                    wordBreak="break-word"
+                  >
+                    {streamingText}
+                  </Box>
+                </CardBody>
+              )}
+            </Card>
+          )}
           {/* Selected Indicators */}
           {selectedIndicators.length > 0 && (
             <Card>
@@ -270,87 +423,12 @@ function Indicators() {
               <CardBody p={0}>
                 <Accordion allowMultiple>
                   {recommendations.map((rec) => (
-                    <AccordionItem key={rec.indicator_id}>
-                      <AccordionButton>
-                        <HStack flex="1" justify="space-between" pr={2}>
-                          <HStack>
-                            <Checkbox
-                              isChecked={isSelected(rec.indicator_id)}
-                              onChange={() => toggleIndicator(rec)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                            <Badge colorScheme="blue">{rec.indicator_id}</Badge>
-                            <Text fontWeight="bold" noOfLines={1}>{rec.indicator_name}</Text>
-                          </HStack>
-                          <HStack>
-                            <Progress
-                              value={rec.relevance_score * 100}
-                              size="sm"
-                              w="60px"
-                              colorScheme="green"
-                            />
-                            <Text fontSize="sm">{(rec.relevance_score * 100).toFixed(0)}%</Text>
-                          </HStack>
-                        </HStack>
-                        <AccordionIcon />
-                      </AccordionButton>
-                      <AccordionPanel pb={4}>
-                        <VStack align="stretch" spacing={3}>
-                          <Text fontSize="sm">{rec.rationale}</Text>
-                          <HStack>
-                            {rec.rank > 0 && (
-                              <Badge colorScheme="purple">#{rec.rank}</Badge>
-                            )}
-                            <Badge colorScheme={rec.relationship_direction === 'positive' || rec.relationship_direction === 'INCREASE' ? 'green' : 'orange'}>
-                              {rec.relationship_direction}
-                            </Badge>
-                            {rec.strength_score && (
-                              <Badge colorScheme={rec.strength_score === 'A' ? 'green' : rec.strength_score === 'B' ? 'blue' : 'gray'}>
-                                Strength {rec.strength_score}
-                              </Badge>
-                            )}
-                            <Badge colorScheme={rec.confidence === 'high' ? 'green' : 'yellow'}>
-                              {rec.confidence} confidence
-                            </Badge>
-                            {rec.transferability_summary && (
-                              <Badge colorScheme="teal" variant="outline">
-                                Transfer: {rec.transferability_summary.high_count}H/{rec.transferability_summary.moderate_count}M/{rec.transferability_summary.low_count}L
-                              </Badge>
-                            )}
-                          </HStack>
-
-                          {/* Evidence citations */}
-                          {rec.evidence_citations && rec.evidence_citations.length > 0 ? (
-                            <Box>
-                              <Text fontSize="xs" fontWeight="bold" color="gray.600" mb={1}>Evidence Citations:</Text>
-                              <VStack align="stretch" spacing={1}>
-                                {rec.evidence_citations.map((cit) => (
-                                  <HStack key={cit.evidence_id} fontSize="xs" color="gray.600" align="start" spacing={2}>
-                                    <Badge size="sm" variant="outline" colorScheme="gray" flexShrink={0}>
-                                      {cit.evidence_id}
-                                    </Badge>
-                                    <Text noOfLines={2} flex={1}>
-                                      {cit.citation || 'No citation text'}
-                                      {cit.year ? ` (${cit.year})` : ''}
-                                    </Text>
-                                    {cit.direction && (
-                                      <Badge size="sm" colorScheme={cit.direction === 'positive' ? 'green' : 'orange'} flexShrink={0}>
-                                        {cit.direction}
-                                      </Badge>
-                                    )}
-                                  </HStack>
-                                ))}
-                              </VStack>
-                            </Box>
-                          ) : rec.evidence_ids.length > 0 ? (
-                            <Text fontSize="xs" color="gray.500">
-                              Evidence: {rec.evidence_ids.slice(0, 3).join(', ')}
-                              {rec.evidence_ids.length > 3 && ` +${rec.evidence_ids.length - 3} more`}
-                            </Text>
-                          ) : null}
-                        </VStack>
-                      </AccordionPanel>
-                    </AccordionItem>
+                    <RecommendationItem
+                      key={rec.indicator_id}
+                      rec={rec}
+                      selected={selectedIds.has(rec.indicator_id)}
+                      onToggle={toggleIndicator}
+                    />
                   ))}
                 </Accordion>
               </CardBody>

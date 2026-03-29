@@ -193,6 +193,68 @@ class KnowledgeBase:
                 sz += chunk
         return out
 
+    # Tables the LLM always needs for ranking / code expansion
+    _ESSENTIAL_TABLES = {
+        'A_indicators', 'A_categories',
+        'C_performance', 'C_subdimensions',
+        'D_directions', 'D_significance',
+        'F_quality',
+    }
+    # Project-profile field → codebook table mapping
+    _PROJECT_TABLES = {
+        'koppen_zone_id': 'K_climate',
+        'lcz_type_id': 'L_lcz',
+        'space_type_id': 'E_settings',
+        'age_group_id': 'M_age_groups',
+    }
+
+    def get_codebook_for_cards(
+        self,
+        project_ctx: dict | None = None,
+        max_chars: int = 40000,
+    ) -> dict:
+        """Pruned codebook: only tables the LLM actually needs.
+
+        Always includes essential tables (indicator defs, dimensions, directions,
+        significance, quality tiers, categories).  Adds project-profile tables
+        only when the corresponding field is set.  Skips everything else
+        (B_methods, B_units, E_countries, D_stat_tests, …) to cut ~60 % tokens.
+        """
+        needed = set(self._ESSENTIAL_TABLES)
+        if project_ctx:
+            for field, table in self._PROJECT_TABLES.items():
+                if project_ctx.get(field):
+                    needed.add(table)
+
+        out: dict = {}
+        sz = 0
+        # Iterate in priority order so the most important tables come first
+        for name in self._CODEBOOK_PRIORITY:
+            if name not in needed:
+                continue
+            table = self.appendix.get(name)
+            if not table or not isinstance(table, dict):
+                continue
+            simplified = {}
+            for code, entry in table.items():
+                if not isinstance(entry, dict):
+                    continue
+                item: dict = {
+                    "name": entry.get("name", code),
+                    "definition": entry.get("definition", "")[:200],
+                }
+                if name == "A_indicators":
+                    if entry.get("formula"):
+                        item["formula"] = entry["formula"][:150]
+                    if entry.get("category"):
+                        item["category"] = entry["category"]
+                simplified[code] = item
+            chunk = len(json.dumps(simplified, ensure_ascii=False))
+            if sz + chunk < max_chars:
+                out[name] = simplified
+                sz += chunk
+        return out
+
     def get_codebook_section(self, section: str) -> Optional[list[dict]]:
         """Get a section from the codebook/appendix"""
         return self.appendix.get(section)

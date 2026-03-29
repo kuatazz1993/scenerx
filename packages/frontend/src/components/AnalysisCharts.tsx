@@ -15,8 +15,15 @@ import {
   Tooltip,
   Cell,
   ResponsiveContainer,
+  ErrorBar,
+  ScatterChart,
+  Scatter,
+  ZAxis,
+  LineChart,
+  Line,
+  ReferenceLine,
 } from 'recharts';
-import type { EnrichedZoneStat, ZoneDiagnostic } from '../types';
+import type { EnrichedZoneStat, ZoneDiagnostic, ArchetypeProfile } from '../types';
 
 // Shared color palette for zones
 const ZONE_COLORS = [
@@ -431,6 +438,384 @@ export function IndicatorComparisonChart({ stats, layer }: IndicatorComparisonCh
           <Bar key={zone} dataKey={zone} fill={getZoneColor(i)} />
         ))}
       </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+
+// ─── Descriptive Statistics Chart (Mean ± Std with Min/Max) ─────────────────
+
+interface DescriptiveStatsChartProps {
+  stats: EnrichedZoneStat[];
+  layer: string;
+}
+
+export function DescriptiveStatsChart({ stats, layer }: DescriptiveStatsChartProps) {
+  const data = useMemo(() => {
+    const filtered = stats.filter(s => s.layer === layer);
+    const indicators = Array.from(new Set(filtered.map(s => s.indicator_id))).sort();
+    return indicators.map(ind => {
+      const rows = filtered.filter(s => s.indicator_id === ind);
+      const means = rows.map(r => r.mean ?? 0);
+      const stds = rows.map(r => r.std ?? 0);
+      const mins = rows.map(r => r.min ?? 0);
+      const maxs = rows.map(r => r.max ?? 0);
+      const avgMean = means.reduce((a, b) => a + b, 0) / (means.length || 1);
+      const avgStd = stds.reduce((a, b) => a + b, 0) / (stds.length || 1);
+      return {
+        indicator: ind,
+        mean: Number(avgMean.toFixed(3)),
+        std: Number(avgStd.toFixed(3)),
+        min: Number(Math.min(...mins).toFixed(3)),
+        max: Number(Math.max(...maxs).toFixed(3)),
+      };
+    });
+  }, [stats, layer]);
+
+  if (data.length === 0) return null;
+
+  return (
+    <ResponsiveContainer width="100%" height={Math.max(250, data.length * 40 + 60)}>
+      <BarChart data={data} layout="vertical" margin={{ left: 20, right: 30, top: 5, bottom: 5 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis type="number" tick={{ fontSize: 10 }} />
+        <YAxis type="category" dataKey="indicator" tick={{ fontSize: 9 }} width={100} />
+        <Tooltip formatter={(v: number, name: string) => [v.toFixed(3), name]} />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        <Bar dataKey="mean" fill="#3182CE" name="Mean" barSize={14}>
+          <ErrorBar dataKey="std" direction="x" stroke="#2D3748" strokeWidth={1} />
+        </Bar>
+        <Bar dataKey="min" fill="#E53E3E" name="Min" barSize={6} />
+        <Bar dataKey="max" fill="#38A169" name="Max" barSize={6} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+
+// ─── Z-Score Heatmap (Zone × Indicator, colored by z-score) ─────────────────
+
+interface ZScoreHeatmapProps {
+  stats: EnrichedZoneStat[];
+  layer: string;
+}
+
+export function ZScoreHeatmap({ stats, layer }: ZScoreHeatmapProps) {
+  const { zones, indicators, grid } = useMemo(() => {
+    const filtered = stats.filter(s => s.layer === layer);
+    const zoneList = Array.from(new Set(filtered.map(s => s.zone_name))).sort();
+    const indList = Array.from(new Set(filtered.map(s => s.indicator_id))).sort();
+    const g: Record<string, Record<string, { z: number; val: number }>> = {};
+    for (const s of filtered) {
+      if (!g[s.zone_name]) g[s.zone_name] = {};
+      g[s.zone_name][s.indicator_id] = { z: s.z_score ?? 0, val: s.mean ?? 0 };
+    }
+    return { zones: zoneList, indicators: indList, grid: g };
+  }, [stats, layer]);
+
+  if (zones.length === 0 || indicators.length === 0) return null;
+
+  const cellW = Math.max(44, Math.min(56, 600 / Math.max(indicators.length, 1)));
+  const cellH = 36;
+  const labelW = 120;
+  const labelH = 90;
+  const svgW = labelW + indicators.length * cellW;
+  const svgH = labelH + zones.length * cellH + 30;
+
+  function zColor(z: number): string {
+    const clamped = Math.max(-2, Math.min(2, z));
+    const t = (clamped + 2) / 4; // 0..1
+    // Red (low) → Yellow (mid) → Green (high)
+    if (t < 0.5) {
+      const r = 229, g = Math.round(62 + (204 - 62) * t * 2), b = 62;
+      return `rgb(${r},${g},${b})`;
+    }
+    const r = Math.round(204 - (204 - 56) * (t - 0.5) * 2), g = Math.round(204 - (204 - 161) * (t - 0.5) * 2), b = Math.round(62 - (62 - 56) * (t - 0.5) * 2);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {indicators.map((ind, ci) => (
+          <text key={`col-${ind}`} x={labelW + ci * cellW + cellW / 2} y={labelH - 6} textAnchor="end" fontSize={9}
+            transform={`rotate(-45, ${labelW + ci * cellW + cellW / 2}, ${labelH - 6})`}
+          >{ind.length > 12 ? ind.slice(0, 12) + '…' : ind}</text>
+        ))}
+        {zones.map((zone, ri) => (
+          <g key={zone}>
+            <text x={labelW - 6} y={labelH + ri * cellH + cellH / 2 + 4} textAnchor="end" fontSize={10}>
+              {zone.length > 14 ? zone.slice(0, 14) + '…' : zone}
+            </text>
+            {indicators.map((ind, ci) => {
+              const cell = grid[zone]?.[ind];
+              const z = cell?.z ?? 0;
+              const val = cell?.val ?? 0;
+              return (
+                <g key={`${zone}-${ind}`}>
+                  <rect x={labelW + ci * cellW} y={labelH + ri * cellH} width={cellW - 2} height={cellH - 2} rx={3}
+                    fill={cell ? zColor(z) : '#EDF2F7'} opacity={0.85}
+                  ><title>{`${zone} × ${ind}: val=${val.toFixed(2)}, z=${z.toFixed(2)}`}</title></rect>
+                  <text x={labelW + ci * cellW + (cellW - 2) / 2} y={labelH + ri * cellH + (cellH - 2) / 2 + 4}
+                    textAnchor="middle" fontSize={9} fill="#fff" fontWeight="bold" pointerEvents="none"
+                  >{val.toFixed(1)}</text>
+                </g>
+              );
+            })}
+          </g>
+        ))}
+        <g transform={`translate(${labelW}, ${svgH - 18})`}>
+          {[{l: '-2 (low)', c: zColor(-2)}, {l: '-1', c: zColor(-1)}, {l: '0', c: zColor(0)}, {l: '+1', c: zColor(1)}, {l: '+2 (high)', c: zColor(2)}].map((item, i) => (
+            <g key={i} transform={`translate(${i * 80}, 0)`}>
+              <rect width={12} height={12} fill={item.c} rx={2} opacity={0.85} />
+              <text x={16} y={10} fontSize={8} fill="#4A5568">{item.l}</text>
+            </g>
+          ))}
+        </g>
+      </svg>
+    </Box>
+  );
+}
+
+
+// ─── Box Plot by Layer (per indicator) ──────────────────────────────────────
+
+interface BoxPlotChartProps {
+  stats: EnrichedZoneStat[];
+  indicatorId: string;
+}
+
+export function BoxPlotChart({ stats, indicatorId }: BoxPlotChartProps) {
+  const LAYER_COLORS: Record<string, string> = { full: '#3182CE', foreground: '#38A169', middleground: '#D69E2E', background: '#805AD5' };
+  const layers = ['full', 'foreground', 'middleground', 'background'];
+
+  const data = useMemo(() => {
+    return layers.map(layer => {
+      const vals = stats.filter(s => s.indicator_id === indicatorId && s.layer === layer && s.mean != null).map(s => s.mean!);
+      if (vals.length === 0) return null;
+      vals.sort((a, b) => a - b);
+      const q1 = vals[Math.floor(vals.length * 0.25)] ?? 0;
+      const median = vals[Math.floor(vals.length * 0.5)] ?? 0;
+      const q3 = vals[Math.floor(vals.length * 0.75)] ?? 0;
+      const min = vals[0];
+      const max = vals[vals.length - 1];
+      return { layer, min, q1, median, q3, max, n: vals.length };
+    }).filter(Boolean) as { layer: string; min: number; q1: number; median: number; q3: number; max: number; n: number }[];
+  }, [stats, indicatorId]);
+
+  if (data.length === 0) return null;
+
+  const svgW = 400;
+  const svgH = 200;
+  const plotL = 60, plotR = svgW - 20, plotT = 20, plotB = svgH - 40;
+  const allVals = data.flatMap(d => [d.min, d.max]);
+  const yMin = Math.min(...allVals);
+  const yMax = Math.max(...allVals);
+  const yRange = yMax - yMin || 1;
+  const toY = (v: number) => plotB - ((v - yMin) / yRange) * (plotB - plotT);
+  const boxW = Math.min(50, (plotR - plotL) / data.length - 10);
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {/* Y axis */}
+        {[0, 0.25, 0.5, 0.75, 1].map(t => {
+          const v = yMin + t * yRange;
+          const y = toY(v);
+          return (
+            <g key={t}>
+              <line x1={plotL} y1={y} x2={plotR} y2={y} stroke="#E2E8F0" />
+              <text x={plotL - 5} y={y + 4} textAnchor="end" fontSize={9} fill="#718096">{v.toFixed(2)}</text>
+            </g>
+          );
+        })}
+        {data.map((d, i) => {
+          const cx = plotL + (i + 0.5) * ((plotR - plotL) / data.length);
+          const color = LAYER_COLORS[d.layer] || '#718096';
+          return (
+            <g key={d.layer}>
+              {/* Whisker line */}
+              <line x1={cx} y1={toY(d.min)} x2={cx} y2={toY(d.max)} stroke={color} strokeWidth={1.5} />
+              {/* Min/Max caps */}
+              <line x1={cx - boxW / 4} y1={toY(d.min)} x2={cx + boxW / 4} y2={toY(d.min)} stroke={color} strokeWidth={1.5} />
+              <line x1={cx - boxW / 4} y1={toY(d.max)} x2={cx + boxW / 4} y2={toY(d.max)} stroke={color} strokeWidth={1.5} />
+              {/* Box Q1→Q3 */}
+              <rect x={cx - boxW / 2} y={toY(d.q3)} width={boxW} height={toY(d.q1) - toY(d.q3)} fill={color} opacity={0.3} stroke={color} strokeWidth={1.5} rx={2} />
+              {/* Median line */}
+              <line x1={cx - boxW / 2} y1={toY(d.median)} x2={cx + boxW / 2} y2={toY(d.median)} stroke={color} strokeWidth={2.5} />
+              {/* Label */}
+              <text x={cx} y={plotB + 16} textAnchor="middle" fontSize={10} fill="#4A5568">{d.layer}</text>
+              <text x={cx} y={plotB + 28} textAnchor="middle" fontSize={8} fill="#A0AEC0">n={d.n}</text>
+            </g>
+          );
+        })}
+      </svg>
+    </Box>
+  );
+}
+
+
+// ─── Archetype Radar Chart (Cluster Centroids) ─────────────────────────────
+
+interface ArchetypeRadarChartProps {
+  archetypes: ArchetypeProfile[];
+}
+
+export function ArchetypeRadarChart({ archetypes }: ArchetypeRadarChartProps) {
+  const { data, names } = useMemo(() => {
+    if (!archetypes || archetypes.length === 0) return { data: [], names: [] };
+    const allInds = Array.from(new Set(archetypes.flatMap(a => Object.keys(a.centroid_values)))).sort();
+    const chartData = allInds.map(ind => {
+      const row: Record<string, string | number> = { indicator: ind };
+      for (const a of archetypes) {
+        row[a.archetype_label] = Number((a.centroid_values[ind] ?? 0).toFixed(3));
+      }
+      return row;
+    });
+    return { data: chartData, names: archetypes.map(a => a.archetype_label) };
+  }, [archetypes]);
+
+  if (data.length === 0 || names.length === 0) return null;
+
+  return (
+    <ResponsiveContainer width="100%" height={400}>
+      <RadarChart data={data} cx="50%" cy="50%" outerRadius="75%">
+        <PolarGrid />
+        <PolarAngleAxis dataKey="indicator" tick={{ fontSize: 9 }} tickFormatter={(v: string) => v.length > 10 ? v.slice(0, 10) + '…' : v} />
+        <PolarRadiusAxis tick={{ fontSize: 10 }} />
+        {names.map((name, i) => (
+          <Radar key={name} name={name} dataKey={name} stroke={getZoneColor(i)} fill={getZoneColor(i)} fillOpacity={0.15} />
+        ))}
+        <Legend wrapperStyle={{ fontSize: 12 }} />
+        <Tooltip />
+      </RadarChart>
+    </ResponsiveContainer>
+  );
+}
+
+
+// ─── Cluster Size Bar Chart ────────────────────────────────────────────────
+
+interface ClusterSizeChartProps {
+  archetypes: ArchetypeProfile[];
+}
+
+export function ClusterSizeChart({ archetypes }: ClusterSizeChartProps) {
+  const data = useMemo(() => {
+    return archetypes.map(a => ({
+      name: a.archetype_label,
+      count: a.point_count,
+    }));
+  }, [archetypes]);
+
+  if (data.length === 0) return null;
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <BarChart data={data} margin={{ left: 10, right: 10, top: 5, bottom: 5 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+        <YAxis tick={{ fontSize: 10 }} label={{ value: 'Points', angle: -90, position: 'insideLeft', fontSize: 10 }} />
+        <Tooltip />
+        <Bar dataKey="count" name="Points" barSize={40}>
+          {data.map((_, i) => <Cell key={i} fill={getZoneColor(i)} />)}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+
+// ─── Spatial Scatter Map (points colored by value) ─────────────────────────
+
+interface SpatialScatterMapProps {
+  points: { lat: number; lng: number; value: number; label?: string }[];
+  indicatorId?: string;
+}
+
+export function SpatialScatterMap({ points, indicatorId }: SpatialScatterMapProps) {
+  if (!points || points.length === 0) return null;
+
+  const vals = points.map(p => p.value);
+  const vMin = Math.min(...vals);
+  const vMax = Math.max(...vals);
+  const vRange = vMax - vMin || 1;
+
+  const svgW = 500;
+  const svgH = 400;
+  const margin = { l: 60, r: 20, t: 20, b: 50 };
+  const plotW = svgW - margin.l - margin.r;
+  const plotH = svgH - margin.t - margin.b;
+
+  const lngs = points.map(p => p.lng);
+  const lats = points.map(p => p.lat);
+  const lngMin = Math.min(...lngs), lngMax = Math.max(...lngs);
+  const latMin = Math.min(...lats), latMax = Math.max(...lats);
+  const lngRange = lngMax - lngMin || 0.001;
+  const latRange = latMax - latMin || 0.001;
+
+  const toX = (lng: number) => margin.l + ((lng - lngMin) / lngRange) * plotW;
+  const toYPos = (lat: number) => margin.t + plotH - ((lat - latMin) / latRange) * plotH;
+
+  function valColor(v: number): string {
+    const t = (v - vMin) / vRange;
+    const r = Math.round(229 - t * 173);
+    const g = Math.round(62 + t * 99);
+    const b = Math.round(62 - t * 6);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {/* Axes */}
+        <line x1={margin.l} y1={margin.t} x2={margin.l} y2={margin.t + plotH} stroke="#CBD5E0" />
+        <line x1={margin.l} y1={margin.t + plotH} x2={margin.l + plotW} y2={margin.t + plotH} stroke="#CBD5E0" />
+        <text x={svgW / 2} y={svgH - 5} textAnchor="middle" fontSize={10} fill="#718096">Longitude</text>
+        <text x={12} y={svgH / 2} textAnchor="middle" fontSize={10} fill="#718096" transform={`rotate(-90, 12, ${svgH / 2})`}>Latitude</text>
+        {indicatorId && <text x={svgW / 2} y={14} textAnchor="middle" fontSize={11} fontWeight="bold" fill="#2D3748">{indicatorId}</text>}
+        {/* Points */}
+        {points.map((p, i) => (
+          <circle key={i} cx={toX(p.lng)} cy={toYPos(p.lat)} r={5} fill={valColor(p.value)} stroke="#fff" strokeWidth={0.5} opacity={0.85}>
+            <title>{`${p.label || ''} (${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}): ${p.value.toFixed(3)}`}</title>
+          </circle>
+        ))}
+        {/* Legend */}
+        <defs>
+          <linearGradient id="spatialGrad" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor={valColor(vMin)} />
+            <stop offset="100%" stopColor={valColor(vMax)} />
+          </linearGradient>
+        </defs>
+        <rect x={margin.l + plotW - 120} y={margin.t + 5} width={100} height={10} fill="url(#spatialGrad)" rx={2} />
+        <text x={margin.l + plotW - 122} y={margin.t + 14} textAnchor="end" fontSize={8} fill="#718096">{vMin.toFixed(2)}</text>
+        <text x={margin.l + plotW - 18} y={margin.t + 14} textAnchor="start" fontSize={8} fill="#718096">{vMax.toFixed(2)}</text>
+      </svg>
+    </Box>
+  );
+}
+
+
+// ─── Silhouette Score Curve ────────────────────────────────────────────────
+
+interface SilhouetteCurveProps {
+  scores: { k: number; silhouette: number }[];
+  bestK: number;
+}
+
+export function SilhouetteCurve({ scores, bestK }: SilhouetteCurveProps) {
+  if (!scores || scores.length === 0) return null;
+
+  return (
+    <ResponsiveContainer width="100%" height={250}>
+      <LineChart data={scores} margin={{ left: 10, right: 20, top: 10, bottom: 5 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="k" tick={{ fontSize: 11 }} label={{ value: 'Number of Clusters (K)', position: 'insideBottom', offset: -2, fontSize: 11 }} />
+        <YAxis tick={{ fontSize: 11 }} label={{ value: 'Silhouette Score', angle: -90, position: 'insideLeft', fontSize: 11 }} domain={[0, 'auto']} />
+        <Tooltip formatter={(v: number) => [v.toFixed(4), 'Silhouette']} />
+        <ReferenceLine x={bestK} stroke="#805AD5" strokeDasharray="5 5" label={{ value: `K=${bestK}`, position: 'top', fontSize: 10, fill: '#805AD5' }} />
+        <Line type="monotone" dataKey="silhouette" stroke="#3182CE" strokeWidth={2} dot={{ r: 4, fill: '#3182CE' }} activeDot={{ r: 6 }} />
+      </LineChart>
     </ResponsiveContainer>
   );
 }

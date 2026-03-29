@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.config import Settings
+from app.core.config import Settings, update_env_file
 from app.api.deps import (
     get_settings_dep,
     get_vision_client,
@@ -99,13 +99,28 @@ async def list_llm_providers(settings: Settings = Depends(get_settings_dep)):
     return providers
 
 
+_MODEL_ENV_KEY = {
+    "gemini": "GEMINI_MODEL",
+    "openai": "OPENAI_MODEL",
+    "anthropic": "ANTHROPIC_MODEL",
+    "deepseek": "DEEPSEEK_MODEL",
+}
+
+_MODEL_ATTR = {
+    "gemini": "gemini_model",
+    "openai": "openai_model",
+    "anthropic": "anthropic_model",
+    "deepseek": "deepseek_model",
+}
+
+
 @router.put("/llm-provider")
 async def update_llm_provider(
     provider: str,
     model: str = None,
     settings: Settings = Depends(get_settings_dep),
 ):
-    """Switch active LLM provider at runtime."""
+    """Switch active LLM provider and persist to .env."""
     if provider not in LLM_PROVIDERS:
         raise HTTPException(
             status_code=400,
@@ -122,11 +137,39 @@ async def update_llm_provider(
 
     deps_switch_provider(provider, model)
     current_model = model or _get_model_for_provider(provider, settings)
+
+    # Persist to .env
+    env_updates = {"LLM_PROVIDER": provider}
+    if model:
+        env_key = _MODEL_ENV_KEY.get(provider)
+        if env_key:
+            env_updates[env_key] = model
+        # Also update in-memory settings
+        attr = _MODEL_ATTR.get(provider)
+        if attr:
+            setattr(settings, attr, model)
+    update_env_file(env_updates)
+
     return {
         "message": f"Switched to {LLM_PROVIDERS[provider]['name']}",
         "provider": provider,
         "model": current_model,
     }
+
+
+_KEY_ATTR = {
+    "gemini": "google_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+    "deepseek": "deepseek_api_key",
+}
+
+_KEY_ENV = {
+    "gemini": "GOOGLE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
 
 
 @router.put("/llm-api-key")
@@ -135,25 +178,24 @@ async def update_llm_api_key(
     api_key: str,
     settings: Settings = Depends(get_settings_dep),
 ):
-    """Update API key for a provider at runtime (not persisted to .env file)."""
+    """Update API key for a provider and persist to .env."""
     if provider not in LLM_PROVIDERS:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown provider: {provider}. Available: {list(LLM_PROVIDERS.keys())}",
         )
-    # Update the settings object in memory
-    key_attr = {
-        "gemini": "google_api_key",
-        "openai": "openai_api_key",
-        "anthropic": "anthropic_api_key",
-        "deepseek": "deepseek_api_key",
-    }.get(provider)
-    if key_attr:
-        setattr(settings, key_attr, api_key)
+    # Update in-memory settings
+    attr = _KEY_ATTR.get(provider)
+    if attr:
+        setattr(settings, attr, api_key)
+    # Persist to .env
+    env_key = _KEY_ENV.get(provider)
+    if env_key:
+        update_env_file({env_key: api_key})
     # Reset LLM singletons so new key takes effect
     deps_switch_provider(provider)
     return {
-        "message": f"API key updated for {LLM_PROVIDERS[provider]['name']}",
+        "message": f"API key saved for {LLM_PROVIDERS[provider]['name']}",
         "provider": provider,
         "configured": bool(api_key),
     }
@@ -178,17 +220,17 @@ def _fetch_gemini_models_sync(api_key: str) -> list[dict]:
 
     client = genai.Client(api_key=api_key)
     models = []
+    # Exclude embedding / AQA / vision-only models that can't do generateContent
+    _SKIP = {"embedding", "aqa", "imagen", "veo", "chirp", "medlm"}
     for m in client.models.list():
         name = m.name or ""
-        # Only include generateContent-capable models
-        methods = getattr(m, "supported_generation_methods", None) or []
-        if "generateContent" not in methods:
+        model_id = name.removeprefix("models/").removeprefix("publishers/google/models/")
+        if not model_id.startswith("gemini"):
             continue
-        # Strip "models/" prefix for the id
-        model_id = name.removeprefix("models/")
+        if any(s in model_id for s in _SKIP):
+            continue
         display = getattr(m, "display_name", "") or model_id
         models.append({"id": model_id, "label": display})
-    # Sort: gemini-3 first, then gemini-2.5, then rest; within group alphabetical
     models.sort(key=lambda x: x["id"])
     return models
 
@@ -198,7 +240,11 @@ async def list_provider_models(
     provider: str,
     settings: Settings = Depends(get_settings_dep),
 ):
-    """List available models for a given provider by querying its API."""
+    """List available models for a given provider by querying its API.
+
+    Returns an empty list (instead of an error) when the key is missing or
+    the upstream call fails, so the frontend can fall back to its hardcoded list.
+    """
     if provider not in LLM_PROVIDERS:
         raise HTTPException(
             status_code=400,
@@ -207,18 +253,14 @@ async def list_provider_models(
 
     api_key = _get_api_key_for_provider(provider, settings)
     if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No API key configured for {provider}.",
-        )
+        return []  # frontend falls back to hardcoded list
 
     try:
         if provider == "gemini":
             models = await asyncio.to_thread(_fetch_gemini_models_sync, api_key)
             return models
     except Exception as e:
-        logger.error("Failed to fetch models for %s: %s", provider, e)
-        raise HTTPException(status_code=502, detail=f"Failed to fetch models from {provider}: {e}")
+        logger.warning("Failed to fetch models for %s: %s", provider, e)
+        return []  # frontend falls back to hardcoded list
 
-    # Other providers: return empty list (frontend uses hardcoded fallback)
     return []
