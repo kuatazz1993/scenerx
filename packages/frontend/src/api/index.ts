@@ -24,6 +24,7 @@ import type {
   ReportRequest,
   ReportResult,
   ClusteringRequest,
+  ClusteringByProjectRequest,
   ClusteringResponse,
   MergedExportRequest,
 } from '../types';
@@ -236,6 +237,8 @@ export const api = {
       apiClient.post<ZoneAnalysisResult>('/api/analysis/zone-statistics', data),
     runClustering: (data: ClusteringRequest) =>
       apiClient.post<ClusteringResponse>('/api/analysis/clustering', data),
+    runClusteringByProject: (data: ClusteringByProjectRequest) =>
+      apiClient.post<ClusteringResponse>('/api/analysis/clustering/by-project', data),
     exportMerged: (data: MergedExportRequest) =>
       apiClient.post<Record<string, unknown>>('/api/analysis/export-merged', data),
     runDesignStrategies: (data: unknown) =>

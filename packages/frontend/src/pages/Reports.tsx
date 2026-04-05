@@ -41,7 +41,7 @@ import {
 import { Download, FileText, FileImage, CheckCircle, AlertTriangle, Sparkles, RefreshCw } from 'lucide-react';
 import useAppStore from '../store/useAppStore';
 import { generateReport } from '../utils/generateReport';
-import { useGenerateReport, useRunDesignStrategies, useRunClustering } from '../hooks/useApi';
+import { useGenerateReport, useRunDesignStrategies, useRunClusteringByProject } from '../hooks/useApi';
 import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
 import PageHeader from '../components/PageHeader';
@@ -200,7 +200,7 @@ function Reports() {
   const generateReportMutation = useGenerateReport();
 
   // Clustering + retry strategies
-  const clusteringMutation = useRunClustering();
+  const clusteringMutation = useRunClusteringByProject();
   const designStrategiesMutation = useRunDesignStrategies();
   const [clusteringResult, setClusteringResult] = useState<ClusteringResponse | null>(null);
 
@@ -232,31 +232,33 @@ function Reports() {
   }, [zoneAnalysisResult, designStrategiesMutation, toast]);
 
   const handleRunClustering = useCallback(async () => {
-    if (!zoneAnalysisResult) return;
+    if (!zoneAnalysisResult || !currentProject) return;
     try {
-      const pointMetrics = zoneAnalysisResult.zone_statistics
-        .filter(s => s.layer === 'full')
-        .map(s => ({ zone_id: s.zone_id, zone_name: s.zone_name, indicator_id: s.indicator_id, value: s.mean }));
+      const indicatorIds = Object.keys(zoneAnalysisResult.indicator_definitions);
       const result = await clusteringMutation.mutateAsync({
-        point_metrics: pointMetrics,
-        indicator_definitions: zoneAnalysisResult.indicator_definitions,
+        project_id: currentProject.id,
+        indicator_ids: indicatorIds,
         layer: 'full',
       });
       setClusteringResult(result);
       if (result.skipped) {
-        toast({ title: `Clustering skipped: ${result.reason}`, status: 'info' });
+        toast({ title: `Clustering skipped: ${result.reason}`, status: 'info', duration: 6000 });
       } else if (result.clustering) {
         useAppStore.getState().setZoneAnalysisResult({
           ...zoneAnalysisResult,
           clustering: result.clustering,
           segment_diagnostics: result.segment_diagnostics,
         });
-        toast({ title: `${result.clustering.k} archetypes found (silhouette: ${result.clustering.silhouette_score.toFixed(2)})`, status: 'success' });
+        const gpsNote = result.n_points_with_gps ? ` · ${result.n_points_with_gps}/${result.n_points_used} with GPS` : '';
+        toast({
+          title: `${result.clustering.k} archetypes found (silhouette: ${result.clustering.silhouette_score.toFixed(2)})${gpsNote}`,
+          status: 'success',
+        });
       }
     } catch {
       toast({ title: 'Clustering failed', status: 'error' });
     }
-  }, [zoneAnalysisResult, clusteringMutation, toast]);
+  }, [zoneAnalysisResult, currentProject, clusteringMutation, toast]);
 
   const handleGenerateAiReport = useCallback(async () => {
     if (!zoneAnalysisResult) return;
@@ -649,7 +651,7 @@ function Reports() {
                           <VStack align="start" spacing={0}>
                             <Text fontWeight="bold" fontSize="sm">SVC Archetype Clustering</Text>
                             <Text fontSize="xs" color="gray.500">
-                              Discover spatial archetypes via KMeans clustering (requires 20+ data points)
+                              Discover spatial archetypes via KMeans on image-level metrics (requires 10+ images with computed indicators)
                             </Text>
                           </VStack>
                           <HStack>
@@ -667,6 +669,7 @@ function Reports() {
                               variant="outline"
                               onClick={handleRunClustering}
                               isLoading={clusteringMutation.isPending}
+                              isDisabled={!currentProject}
                             >
                               {clusteringResult?.clustering ? 'Re-run' : 'Run Clustering'}
                             </Button>

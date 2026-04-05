@@ -64,12 +64,23 @@ def compute_zone_statistics(
 # ---------------------------------------------------------------------------
 
 class ClusteringRequest(BaseModel):
-    """Request for SVC archetype clustering."""
+    """Request for SVC archetype clustering (caller-built point_metrics)."""
     point_metrics: list[dict]
     indicator_definitions: dict[str, IndicatorDefinitionInput]
     layer: str = "full"
     max_k: int = 10
     knn_k: int = 7
+    min_points: int = 10
+
+
+class ClusteringByProjectRequest(BaseModel):
+    """Request that builds point_metrics from project.uploaded_images (with lat/lng)."""
+    project_id: str
+    indicator_ids: list[str]
+    layer: str = "full"
+    max_k: int = 10
+    knn_k: int = 7
+    min_points: int = 10
 
 
 class ClusteringResponse(BaseModel):
@@ -77,6 +88,8 @@ class ClusteringResponse(BaseModel):
     segment_diagnostics: list = []
     skipped: bool = False
     reason: str = ""
+    n_points_used: int = 0
+    n_points_with_gps: int = 0
 
 
 @router.post("/clustering", response_model=ClusteringResponse)
@@ -85,10 +98,11 @@ def run_clustering(
     service: ClusteringService = Depends(get_clustering_service),
     _user: UserResponse = Depends(get_current_user),
 ):
-    """Run SVC archetype clustering on geo-located image points.
+    """Run SVC archetype clustering on caller-supplied point metrics.
 
-    Requires >= 20 points with indicator values. If coordinates (lat/lng) are
-    present, KNN spatial smoothing is applied.
+    Each point_metrics entry should include point_id, optional lat/lng, and
+    per-indicator values. For project-sourced data, prefer /clustering/by-project
+    which builds this structure directly from uploaded_images.
     """
     try:
         result = service.cluster(
@@ -97,19 +111,125 @@ def run_clustering(
             layer=request.layer,
             max_k=request.max_k,
             knn_k=request.knn_k,
+            min_points=request.min_points,
         )
         if result is None:
             return ClusteringResponse(
                 skipped=True,
-                reason=f"Insufficient data ({len(request.point_metrics)} points, need >= 20)",
+                reason=f"Insufficient data ({len(request.point_metrics)} points, need >= {request.min_points})",
+                n_points_used=len(request.point_metrics),
             )
         clustering_result, segment_diagnostics = result
         return ClusteringResponse(
             clustering=clustering_result,
             segment_diagnostics=segment_diagnostics,
+            n_points_used=len(clustering_result.point_ids_ordered),
+            n_points_with_gps=len(clustering_result.point_lats),
         )
     except Exception as e:
         logger.error("Clustering failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/clustering/by-project", response_model=ClusteringResponse)
+def run_clustering_by_project(
+    request: ClusteringByProjectRequest,
+    service: ClusteringService = Depends(get_clustering_service),
+    manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Run clustering on image-level point metrics built from a project's uploaded_images.
+
+    Builds one point per zone-assigned image, including lat/lng from EXIF (if
+    present) and per-indicator values from img.metrics_results. Requires that
+    the project pipeline has already been run (so metrics_results is populated).
+    """
+    projects_store = get_projects_store()
+    project = projects_store.get(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {request.project_id}")
+
+    # Validate indicator_ids against loaded calculators
+    valid_ids = [ind for ind in request.indicator_ids if manager.has_calculator(ind)]
+    if not valid_ids:
+        raise HTTPException(status_code=400, detail="No valid calculator found for provided indicator_ids")
+
+    # Build per-indicator definitions
+    indicator_definitions: dict[str, IndicatorDefinitionInput] = {}
+    for ind_id in valid_ids:
+        info = manager.get_calculator(ind_id)
+        if info:
+            indicator_definitions[ind_id] = IndicatorDefinitionInput(
+                id=ind_id,
+                name=info.name,
+                unit=info.unit,
+                target_direction=info.target_direction or "INCREASE",
+                definition=info.definition,
+                category=info.category,
+            )
+
+    # Build point_metrics: one point per zone-assigned image
+    point_metrics: list[dict] = []
+    n_with_gps = 0
+    for img in project.uploaded_images:
+        if not img.zone_id:
+            continue
+        row: dict = {
+            "point_id": img.image_id,
+            "zone_id": img.zone_id,
+        }
+        has_gps = img.latitude is not None and img.longitude is not None
+        if has_gps:
+            row["lat"] = img.latitude
+            row["lng"] = img.longitude
+            n_with_gps += 1
+        has_any = False
+        for ind_id in valid_ids:
+            if request.layer == "full":
+                key = ind_id
+            else:
+                key = f"{ind_id}__{request.layer}"
+            v = img.metrics_results.get(key)
+            if v is not None:
+                row[ind_id] = v
+                has_any = True
+        if has_any:
+            point_metrics.append(row)
+
+    logger.info(
+        "clustering/by-project: project=%s layer=%s points=%d (gps=%d) indicators=%d",
+        request.project_id, request.layer, len(point_metrics), n_with_gps, len(valid_ids),
+    )
+
+    try:
+        result = service.cluster(
+            point_metrics=point_metrics,
+            indicator_definitions=indicator_definitions,
+            layer=request.layer,
+            max_k=request.max_k,
+            knn_k=request.knn_k,
+            min_points=request.min_points,
+        )
+        if result is None:
+            return ClusteringResponse(
+                skipped=True,
+                reason=(
+                    f"Insufficient data ({len(point_metrics)} points with indicators, "
+                    f"need >= {request.min_points}). Run the project pipeline first to "
+                    f"populate per-image metrics."
+                ),
+                n_points_used=len(point_metrics),
+                n_points_with_gps=n_with_gps,
+            )
+        clustering_result, segment_diagnostics = result
+        return ClusteringResponse(
+            clustering=clustering_result,
+            segment_diagnostics=segment_diagnostics,
+            n_points_used=len(clustering_result.point_ids_ordered),
+            n_points_with_gps=len(clustering_result.point_lats),
+        )
+    except Exception as e:
+        logger.error("Clustering (by-project) failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

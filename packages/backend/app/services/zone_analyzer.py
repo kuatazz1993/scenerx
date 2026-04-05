@@ -62,18 +62,36 @@ class ZoneAnalyzer:
             # Guard: drop columns that are entirely NaN (StandardScaler would crash)
             all_nan_cols = df_raw.columns[df_raw.isna().all()]
             if len(all_nan_cols) > 0:
-                logger.warning("Layer '%s': dropping %d all-NaN columns: %s", layer, len(all_nan_cols), list(all_nan_cols))
+                logger.warning(
+                    "Layer '%s': %d indicators have no data and will be marked as z_score=None: %s",
+                    layer, len(all_nan_cols), list(all_nan_cols),
+                )
             df_valid = df_raw.drop(columns=all_nan_cols)
-            if df_valid.empty:
-                zscore_by_layer[layer] = pd.DataFrame(0.0, index=df_raw.index, columns=df_raw.columns)
+            if df_valid.empty or len(df_valid) < 2:
+                # Cannot compute z-scores with <2 zones or zero valid columns
+                logger.warning(
+                    "Layer '%s': z-scores undefined (n_zones=%d, n_valid_indicators=%d) — all z-scores set to None",
+                    layer, len(df_valid), df_valid.shape[1],
+                )
+                zscore_by_layer[layer] = pd.DataFrame(np.nan, index=df_raw.index, columns=df_raw.columns)
                 continue
+            # Identify zero-variance columns (all zones have identical values)
+            # StandardScaler produces z=0 for these, which is mathematically correct
+            # ("every zone at the mean") but still worth flagging.
+            col_std = df_valid.std(ddof=0)
+            zero_var_cols = col_std[col_std == 0].index.tolist()
+            if zero_var_cols:
+                logger.info(
+                    "Layer '%s': %d indicators have zero variance across zones (z=0 for all zones): %s",
+                    layer, len(zero_var_cols), zero_var_cols,
+                )
             scaler = StandardScaler()
             filled = df_valid.fillna(df_valid.mean()).infer_objects(copy=False)
             scaled = scaler.fit_transform(filled)
             z_df = pd.DataFrame(scaled, index=df_valid.index, columns=df_valid.columns)
-            # Re-add dropped all-NaN columns as 0.0 (neutral z-score)
+            # Re-add dropped all-NaN columns as NaN (z-score is undefined, not zero)
             for col in all_nan_cols:
-                z_df[col] = 0.0
+                z_df[col] = np.nan
             # Restore original column order
             zscore_by_layer[layer] = z_df.reindex(columns=df_raw.columns)
 
@@ -94,7 +112,8 @@ class ZoneAnalyzer:
             ind = rec.indicator_id
             if zone not in z_df.index or ind not in z_df.columns:
                 continue
-            z_val = float(z_df.loc[zone, ind])
+            z_raw = z_df.loc[zone, ind]
+            z_val = None if pd.isna(z_raw) else round(float(z_raw), 4)
             pct_val = float(p_df.loc[zone, ind]) if not pd.isna(p_df.loc[zone, ind]) else None
             enriched.append(EnrichedZoneStat(
                 zone_id=rec.zone_id,
@@ -108,7 +127,7 @@ class ZoneAnalyzer:
                 min=rec.min,
                 max=rec.max,
                 area_sqm=rec.area_sqm,
-                z_score=round(z_val, 4),
+                z_score=z_val,
                 percentile=round(pct_val, 2) if pct_val is not None else None,
             ))
 
@@ -218,12 +237,13 @@ class ZoneAnalyzer:
                 for layer in LAYERS:
                     if layer not in zscore_by_layer or zone not in zscore_by_layer[layer].index:
                         continue
-                    z = float(zscore_by_layer[layer].loc[zone, ind_id])
+                    z_raw = zscore_by_layer[layer].loc[zone, ind_id]
+                    z_out = None if pd.isna(z_raw) else round(float(z_raw), 3)
                     val = raw_by_layer[layer].loc[zone, ind_id]
                     defn = ind_defs.get(ind_id)
                     layer_data[layer] = {
                         "value": round(float(val), 4) if not pd.isna(val) else None,
-                        "z_score": round(z, 3),
+                        "z_score": z_out,
                         "target_direction": defn.target_direction if defn else "INCREASE",
                     }
                 indicator_status[ind_id] = layer_data
@@ -310,7 +330,14 @@ def _calc_corr_pval(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             elif j > i:
                 mask = df[c1].notna() & df[c2].notna()
                 if mask.sum() >= 3:
-                    r, p = scipy_stats.pearsonr(df.loc[mask, c1], df.loc[mask, c2])
+                    x1 = df.loc[mask, c1]
+                    x2 = df.loc[mask, c2]
+                    # Guard: pearsonr on constant input returns NaN + warning
+                    if x1.std(ddof=0) == 0 or x2.std(ddof=0) == 0:
+                        continue
+                    r, p = scipy_stats.pearsonr(x1, x2)
+                    if np.isnan(r) or np.isnan(p):
+                        continue
                     corr_m.loc[c1, c2] = r
                     corr_m.loc[c2, c1] = r
                     pval_m.loc[c1, c2] = p

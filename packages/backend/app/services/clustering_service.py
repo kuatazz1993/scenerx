@@ -38,7 +38,7 @@ from app.models.analysis import (
 
 logger = logging.getLogger(__name__)
 
-MIN_POINTS = 20
+DEFAULT_MIN_POINTS = 10
 DEFAULT_MAX_K = 10
 DEFAULT_KNN_K = 7
 
@@ -53,6 +53,7 @@ class ClusteringService:
         layer: str = "full",
         max_k: int = DEFAULT_MAX_K,
         knn_k: int = DEFAULT_KNN_K,
+        min_points: int = DEFAULT_MIN_POINTS,
     ) -> ClusteringResult | None:
         """Run the full clustering pipeline.
 
@@ -65,21 +66,26 @@ class ClusteringService:
             layer: which layer's values to use (default "full")
             max_k: maximum number of clusters to try
             knn_k: k for KNN spatial smoothing
+            min_points: minimum usable points required to run clustering
 
         Returns:
             ClusteringResult or None if insufficient data.
         """
         ind_ids = sorted(indicator_definitions.keys())
-        if not ind_ids or len(point_metrics) < MIN_POINTS:
+        if not ind_ids or len(point_metrics) < min_points:
             logger.info(
                 "Clustering skipped: %d points, %d indicators (need >= %d points)",
-                len(point_metrics), len(ind_ids), MIN_POINTS,
+                len(point_metrics), len(ind_ids), min_points,
             )
             return None
 
         # 1. Build point x indicator matrix
         df, coords, point_ids = self._build_matrix(point_metrics, ind_ids)
-        if len(df) < MIN_POINTS:
+        if len(df) < min_points:
+            logger.info(
+                "Clustering skipped after matrix build: %d usable rows (need >= %d)",
+                len(df), min_points,
+            )
             return None
 
         # 2. Standardise

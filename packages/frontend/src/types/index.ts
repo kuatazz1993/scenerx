@@ -387,6 +387,16 @@ export interface ClusteringRequest {
   layer?: string;
   max_k?: number;
   knn_k?: number;
+  min_points?: number;
+}
+
+export interface ClusteringByProjectRequest {
+  project_id: string;
+  indicator_ids: string[];
+  layer?: string;
+  max_k?: number;
+  knn_k?: number;
+  min_points?: number;
 }
 
 export interface ClusteringResponse {
@@ -394,6 +404,8 @@ export interface ClusteringResponse {
   segment_diagnostics: ZoneDiagnostic[];
   skipped: boolean;
   reason: string;
+  n_points_used?: number;
+  n_points_with_gps?: number;
 }
 
 export interface MergedExportRequest {

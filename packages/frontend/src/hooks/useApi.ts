@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../api';
-import type { ProjectCreate, ZoneAnalysisRequest, FullAnalysisRequest, ProjectPipelineRequest, ReportRequest, ClusteringRequest, MergedExportRequest } from '../types';
+import type { ProjectCreate, ZoneAnalysisRequest, FullAnalysisRequest, ProjectPipelineRequest, ReportRequest, ClusteringRequest, ClusteringByProjectRequest, MergedExportRequest } from '../types';
 
 // Query keys
 export const queryKeys = {
@@ -161,6 +161,13 @@ export function useRunClustering() {
   return useMutation({
     mutationFn: (data: ClusteringRequest) =>
       api.analysis.runClustering(data).then(r => r.data),
+  });
+}
+
+export function useRunClusteringByProject() {
+  return useMutation({
+    mutationFn: (data: ClusteringByProjectRequest) =>
+      api.analysis.runClusteringByProject(data).then(r => r.data),
   });
 }
 
