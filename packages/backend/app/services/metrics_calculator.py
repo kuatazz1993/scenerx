@@ -165,17 +165,19 @@ class MetricsCalculator:
             from PIL import Image
 
             # Load semantic map as RGB numpy array
-            sem_img = Image.open(semantic_map_path).convert("RGB")
-            sem_arr = np.array(sem_img)
+            with Image.open(semantic_map_path) as sem_img:
+                sem_img = sem_img.convert("RGB")
+                sem_arr = np.array(sem_img)
 
             # Load layer mask as grayscale
-            mask_img = Image.open(mask_path).convert("L")
-            mask_arr = np.array(mask_img) > 127  # boolean mask
+            with Image.open(mask_path) as mask_img:
+                mask_img = mask_img.convert("L")
+                mask_arr = np.array(mask_img) > 127  # boolean mask
 
-            if mask_arr.shape[:2] != sem_arr.shape[:2]:
-                # Resize mask to match semantic map
-                mask_img = mask_img.resize((sem_arr.shape[1], sem_arr.shape[0]), Image.NEAREST)
-                mask_arr = np.array(mask_img) > 127
+                if mask_arr.shape[:2] != sem_arr.shape[:2]:
+                    # Resize mask to match semantic map
+                    mask_img = mask_img.resize((sem_arr.shape[1], sem_arr.shape[0]), Image.NEAREST)
+                    mask_arr = np.array(mask_img) > 127
 
             mask_pixels = int(np.sum(mask_arr))
             if mask_pixels == 0:

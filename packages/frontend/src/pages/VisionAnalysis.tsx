@@ -37,7 +37,7 @@ import {
 import { Grid as VirtualGrid } from 'react-window';
 import { ScanSearch, Download, Eye, Archive, Lightbulb, Check as CheckIcon } from 'lucide-react';
 import JSZip from 'jszip';
-import { useSemanticConfig, useProject, useRecommendIndicators } from '../hooks/useApi';
+import { useSemanticConfig, useProject, useRecommendIndicators, useCalculators } from '../hooks/useApi';
 import api from '../api';
 import type { SemanticClass, UploadedImage, IndicatorRecommendation } from '../types';
 import PageShell from '../components/PageShell';
@@ -295,13 +295,15 @@ const RecommendationItem = memo(function RecommendationItem({
   rec,
   selected,
   onToggle,
+  hasCalculator = true,
 }: {
   rec: IndicatorRecommendation;
   selected: boolean;
   onToggle: (rec: IndicatorRecommendation) => void;
+  hasCalculator?: boolean;
 }) {
   return (
-    <AccordionItem borderColor={selected ? 'blue.300' : 'gray.200'}>
+    <AccordionItem borderColor={selected ? 'blue.300' : 'gray.200'} opacity={hasCalculator ? 1 : 0.55}>
       <AccordionButton py={2}>
         <HStack flex="1" justify="space-between" pr={2}>
           <HStack spacing={2}>
@@ -310,9 +312,11 @@ const RecommendationItem = memo(function RecommendationItem({
               onChange={() => onToggle(rec)}
               onClick={(e) => e.stopPropagation()}
               size="sm"
+              isDisabled={!hasCalculator}
             />
             <Badge colorScheme="blue" fontSize="xs">{rec.indicator_id}</Badge>
             <Text fontSize="sm" fontWeight="bold" noOfLines={1}>{rec.indicator_name}</Text>
+            {!hasCalculator && <Badge colorScheme="red" fontSize="2xs">No calculator</Badge>}
           </HStack>
           <HStack spacing={1}>
             <Progress value={rec.relevance_score * 100} size="xs" w="40px" colorScheme="green" />
@@ -384,7 +388,14 @@ function VisionAnalysis() {
 
   const { data: semanticConfig, isLoading: configLoading } = useSemanticConfig();
   const { data: project, isLoading: projectLoading } = useProject(projectId || '');
+  const { data: calculators } = useCalculators();
   const toast = useAppToast();
+
+  // Set of calculator IDs for quick lookup — recommendations without a calculator cannot be computed
+  const calculatorIds = useMemo(
+    () => new Set((calculators || []).map(c => c.id)),
+    [calculators],
+  );
 
   // Vision API health check
   const [visionHealthy, setVisionHealthy] = useState<boolean | null>(null);
@@ -495,12 +506,22 @@ function VisionAnalysis() {
     [selectedIndicators],
   );
   const toggleIndicator = useCallback((rec: IndicatorRecommendation) => {
+    if (!calculatorIds.has(rec.indicator_id)) return; // no calculator — cannot compute
     if (selectedIndicatorIds.has(rec.indicator_id)) {
       removeSelectedIndicator(rec.indicator_id);
     } else {
       addSelectedIndicator(rec);
     }
-  }, [selectedIndicatorIds, removeSelectedIndicator, addSelectedIndicator]);
+  }, [selectedIndicatorIds, calculatorIds, removeSelectedIndicator, addSelectedIndicator]);
+
+  // Remove any persisted selections whose calculator no longer exists
+  useEffect(() => {
+    if (calculatorIds.size === 0 || selectedIndicators.length === 0) return;
+    const invalid = selectedIndicators.filter(i => !calculatorIds.has(i.indicator_id));
+    if (invalid.length > 0) {
+      invalid.forEach(i => removeSelectedIndicator(i.indicator_id));
+    }
+  }, [calculatorIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Default: select all semantic classes once when config loads
   const classesInitialized = useRef(false);
@@ -1151,6 +1172,7 @@ function VisionAnalysis() {
                         rec={rec}
                         selected={selectedIndicatorIds.has(rec.indicator_id)}
                         onToggle={toggleIndicator}
+                        hasCalculator={calculatorIds.has(rec.indicator_id)}
                       />
                     ))}
                   </Accordion>

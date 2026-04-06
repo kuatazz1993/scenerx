@@ -4,6 +4,7 @@ Stage 2.5 (zone statistics) + Stage 3 (design strategies)
 """
 
 import asyncio
+import gc
 import json
 import logging
 from pathlib import Path
@@ -575,6 +576,9 @@ async def _execute_project_pipeline(
             "failed": calc_fail,
             "cached": calc_cached,
         }
+        # Periodic GC to prevent PIL/numpy memory buildup during long batch runs
+        if img_idx % 50 == 0:
+            gc.collect()
         # Yield control back to the event loop so SSE events actually flush
         # (calculator.calculate is synchronous and CPU-bound).
         await asyncio.sleep(0)

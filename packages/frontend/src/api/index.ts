@@ -88,6 +88,14 @@ export const api = {
       ),
     listImages: (projectId: string) =>
       apiClient.get(`/api/projects/${projectId}/images`),
+    reparseGps: (projectId: string) =>
+      apiClient.post<{
+        project_id: string;
+        total_images: number;
+        already_had_gps: number;
+        updated_from_filename: number;
+        still_no_gps: number;
+      }>(`/api/projects/${projectId}/images/reparse-gps`),
   },
 
   // Metrics/Calculators
@@ -269,6 +277,8 @@ export const api = {
         const reader = res.body!.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let gotResult = false;
+        let gotError = false;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -278,10 +288,18 @@ export const api = {
           for (const part of parts) {
             const line = part.trim();
             if (line.startsWith('data: ')) {
-              try { onEvent(JSON.parse(line.slice(6))); }
-              catch { /* skip malformed */ }
+              try {
+                const parsed = JSON.parse(line.slice(6));
+                if (parsed.type === 'result') gotResult = true;
+                if (parsed.type === 'error') gotError = true;
+                onEvent(parsed);
+              } catch { /* skip malformed */ }
             }
           }
+        }
+        // Stream ended without a result — connection was likely dropped by proxy timeout
+        if (!gotResult && !gotError) {
+          throw new Error('Connection lost during pipeline execution. The server may still be processing — please check and retry.');
         }
       });
     },

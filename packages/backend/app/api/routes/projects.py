@@ -1,6 +1,7 @@
 """Project management endpoints"""
 
 import os
+import re
 import uuid
 import shutil
 import logging
@@ -39,6 +40,55 @@ from app.core.config import get_settings
 from app.db.project_store import get_project_store, ProjectStore
 
 router = APIRouter()
+
+
+def _parse_coords_from_filename(filename: str) -> tuple[float, float] | None:
+    """Try to extract (latitude, longitude) from the filename.
+
+    Supports dot-separated formats commonly used in street-view datasets, e.g.:
+        ``0.0.120.1256806.30.2549131桥公 201709 rightp9``
+        → longitude 120.1256806, latitude 30.2549131
+
+    Returns (latitude, longitude) rounded to 7 decimal places, or None.
+    """
+    # Strip extension, then strip non-ASCII suffix (Chinese chars, etc.)
+    stem = Path(filename).stem
+    ascii_prefix = re.split(r'[^\x00-\x7f]', stem, maxsplit=1)[0].rstrip('. _-')
+
+    # Split by dots and look for coordinate-like pairs:
+    # an integer part (1-3 digits) followed by a high-precision decimal part (4+ digits)
+    parts = ascii_prefix.split('.')
+    candidates: list[float] = []
+    i = 0
+    while i < len(parts) - 1:
+        int_part = parts[i]
+        dec_part = parts[i + 1]
+        if re.fullmatch(r'\d{1,3}', int_part) and re.fullmatch(r'\d{4,}', dec_part):
+            value = float(f"{int_part}.{dec_part}")
+            if 1.0 <= abs(value) <= 180.0:
+                candidates.append(value)
+                i += 2
+                continue
+        i += 1
+
+    if len(candidates) < 2:
+        return None
+
+    # Take the last two candidates (earlier segments may be IDs/prefixes)
+    a, b = candidates[-2], candidates[-1]
+
+    # Assign lat vs lng: latitude ∈ [-90, 90], longitude ∈ [-180, 180]
+    if abs(a) <= 90 and abs(b) <= 90:
+        # Both could be latitude — assume (lng, lat) order (common in Chinese datasets)
+        lat, lng = b, a
+    elif abs(a) <= 90:
+        lat, lng = a, b
+    elif abs(b) <= 90:
+        lat, lng = b, a
+    else:
+        return None  # neither qualifies as latitude
+
+    return round(lat, 7), round(lng, 7)
 
 
 def get_projects_store() -> ProjectStore:
@@ -281,6 +331,15 @@ async def upload_images(
         except Exception:
             pass  # Not an image with EXIF or Pillow issue — skip silently
 
+        # Fallback: extract coordinates from filename
+        # Handles patterns like: 0.0.120.1256806.30.2549131桥公 201709 rightp9
+        if not has_gps:
+            coords = _parse_coords_from_filename(safe_name)
+            if coords:
+                latitude, longitude = coords
+                has_gps = True
+                logger.debug("GPS from filename %s: lat=%s, lng=%s", safe_name, latitude, longitude)
+
         # Create image record (use safe_name, not file.filename which may contain path)
         image = UploadedImage(
             image_id=image_id,
@@ -471,6 +530,45 @@ async def list_project_images(project_id: str):
         "project_id": project_id,
         "total": len(project.uploaded_images),
         "images": project.uploaded_images,
+    }
+
+
+@router.post("/{project_id}/images/reparse-gps")
+async def reparse_image_gps(
+    project_id: str,
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Re-extract GPS coordinates from filenames for images that have no GPS data.
+
+    This is useful when images were uploaded before filename-based coordinate
+    parsing was available, or when EXIF data was missing.  It does NOT touch
+    Vision API results or metrics — only updates ``has_gps / latitude / longitude``.
+    """
+    store = get_project_store()
+    project = store.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+
+    updated = 0
+    for img in project.uploaded_images:
+        if img.has_gps:
+            continue
+        coords = _parse_coords_from_filename(img.filename)
+        if coords:
+            img.latitude, img.longitude = coords
+            img.has_gps = True
+            updated += 1
+
+    if updated > 0:
+        project.updated_at = datetime.now()
+        store.save(project)
+
+    return {
+        "project_id": project_id,
+        "total_images": len(project.uploaded_images),
+        "already_had_gps": sum(1 for img in project.uploaded_images if img.has_gps) - updated,
+        "updated_from_filename": updated,
+        "still_no_gps": sum(1 for img in project.uploaded_images if not img.has_gps),
     }
 
 

@@ -46,6 +46,7 @@ function ProjectDetail() {
   const [batchAssigning, setBatchAssigning] = useState(false);
   const [zoneUploading, setZoneUploading] = useState<string | null>(null);
   const [zoneUploadProgress, setZoneUploadProgress] = useState(0);
+  const [reparsingGps, setReparsingGps] = useState(false);
   const zoneFileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const lastClickedIndex = useRef<number>(-1);
 
@@ -224,6 +225,28 @@ function ProjectDetail() {
       toast({ title: 'Failed to assign images', status: 'error' });
     } finally {
       setBatchAssigning(false);
+    }
+  };
+
+  const handleReparseGps = async () => {
+    if (!projectId) return;
+    setReparsingGps(true);
+    try {
+      const { data } = await api.projects.reparseGps(projectId);
+      if (data.updated_from_filename > 0) {
+        toast({
+          title: `GPS extracted from ${data.updated_from_filename} filename(s)`,
+          description: data.still_no_gps > 0 ? `${data.still_no_gps} images still have no GPS` : undefined,
+          status: 'success',
+        });
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      } else {
+        toast({ title: 'No new GPS coordinates found in filenames', status: 'info' });
+      }
+    } catch {
+      toast({ title: 'Failed to parse GPS from filenames', status: 'error' });
+    } finally {
+      setReparsingGps(false);
     }
   };
 
@@ -408,7 +431,7 @@ function ProjectDetail() {
           <Badge colorScheme={assignedCount > 0 ? 'purple' : 'gray'}>{assignedCount}</Badge>
         </HStack>
         {hasImages && (
-          <HStack spacing={1} title="Images with GPS coordinates extracted from EXIF">
+          <HStack spacing={1} title="Images with GPS coordinates (EXIF or filename)">
             <MapPin size={12} color="#319795" />
             <Badge colorScheme={gpsCount > 0 ? 'teal' : 'gray'}>{gpsCount}/{project.uploaded_images.length}</Badge>
           </HStack>
@@ -436,6 +459,34 @@ function ProjectDetail() {
             </Button>
             {' '}to add spatial zones first.
           </Text>
+        </Alert>
+      )}
+
+      {hasImages && gpsCount < images.length && (
+        <Alert status="info" mb={4} borderRadius="md">
+          <AlertIcon />
+          <Box flex={1}>
+            <Text fontSize="sm">
+              {gpsCount === 0
+                ? `${images.length} images have no GPS coordinates.`
+                : `${images.length - gpsCount} of ${images.length} images are missing GPS coordinates.`
+              }
+              {' '}If your filenames contain coordinates (e.g. <code>0.0.120.125.30.254...</code>), you can extract them automatically.
+            </Text>
+          </Box>
+          <Button
+            size="sm"
+            colorScheme="teal"
+            variant="solid"
+            ml={3}
+            isLoading={reparsingGps}
+            loadingText="Parsing..."
+            onClick={handleReparseGps}
+            flexShrink={0}
+          >
+            <MapPin size={14} style={{ marginRight: 6 }} />
+            Extract GPS from filenames
+          </Button>
         </Alert>
       )}
 
