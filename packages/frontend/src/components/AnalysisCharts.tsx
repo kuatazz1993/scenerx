@@ -23,7 +23,7 @@ import {
   Line,
   ReferenceLine,
 } from 'recharts';
-import type { EnrichedZoneStat, ZoneDiagnostic, ArchetypeProfile, UploadedImage } from '../types';
+import type { EnrichedZoneStat, ZoneDiagnostic, ArchetypeProfile, UploadedImage, ImageRecord, GlobalIndicatorStats, DataQualityRow, IndicatorDefinitionInput } from '../types';
 
 // Shared color palette for zones
 const ZONE_COLORS = [
@@ -94,6 +94,97 @@ export function RadarProfileChart({ radarProfiles }: RadarProfileChartProps) {
         <Tooltip />
       </RadarChart>
     </ResponsiveContainer>
+  );
+}
+
+// ─── Radar Profile By Layer (matches notebook Fig 4) ──────────────────────
+// Shows one small radar per zone with 4 overlaid polygons (full/FG/MG/BG).
+
+const RBL_LAYER_ORDER = ['full', 'foreground', 'middleground', 'background'];
+const RBL_LAYER_LABELS: Record<string, string> = {
+  full: 'Full',
+  foreground: 'FG',
+  middleground: 'MG',
+  background: 'BG',
+};
+const RBL_LAYER_COLORS: Record<string, string> = {
+  full: '#3498db',
+  foreground: '#e74c3c',
+  middleground: '#2ecc71',
+  background: '#9b59b6',
+};
+
+interface RadarProfileByLayerProps {
+  radarProfilesByLayer: Record<string, Record<string, Record<string, number>>>;
+}
+
+export function RadarProfileByLayer({ radarProfilesByLayer }: RadarProfileByLayerProps) {
+  const { zones, perZoneData } = useMemo(() => {
+    // Union of zones across all layers
+    const zoneSet = new Set<string>();
+    const indSet = new Set<string>();
+    for (const layer of Object.keys(radarProfilesByLayer)) {
+      const zd = radarProfilesByLayer[layer];
+      for (const zone of Object.keys(zd)) {
+        zoneSet.add(zone);
+        for (const ind of Object.keys(zd[zone])) indSet.add(ind);
+      }
+    }
+    const zoneList = Array.from(zoneSet).sort();
+    const indList = Array.from(indSet).sort();
+
+    // Per-zone chart rows: [{ indicator, full, foreground, middleground, background }, ...]
+    const data: Record<string, { indicator: string; [layer: string]: string | number }[]> = {};
+    for (const zone of zoneList) {
+      data[zone] = indList.map(ind => {
+        const row: { indicator: string; [layer: string]: string | number } = { indicator: ind };
+        for (const layer of RBL_LAYER_ORDER) {
+          const v = radarProfilesByLayer[layer]?.[zone]?.[ind];
+          row[layer] = v ?? 0;
+        }
+        return row;
+      });
+    }
+    return { zones: zoneList, perZoneData: data };
+  }, [radarProfilesByLayer]);
+
+  if (zones.length === 0) return null;
+
+  return (
+    <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={4}>
+      {zones.map(zone => (
+        <Box key={zone}>
+          <Text fontSize="xs" fontWeight="bold" mb={1} textAlign="center" noOfLines={1}>
+            {zone}
+          </Text>
+          <ResponsiveContainer width="100%" height={260}>
+            <RadarChart data={perZoneData[zone]} cx="50%" cy="50%" outerRadius="70%">
+              <PolarGrid />
+              <PolarAngleAxis
+                dataKey="indicator"
+                tick={{ fontSize: 9 }}
+                tickLine={false}
+                tickFormatter={(v: string) => (v.length > 8 ? v.slice(0, 8) + '…' : v)}
+              />
+              <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 8 }} />
+              {RBL_LAYER_ORDER.map(layer => (
+                <Radar
+                  key={layer}
+                  name={RBL_LAYER_LABELS[layer]}
+                  dataKey={layer}
+                  stroke={RBL_LAYER_COLORS[layer]}
+                  fill={RBL_LAYER_COLORS[layer]}
+                  fillOpacity={layer === 'full' ? 0.15 : 0}
+                  strokeWidth={layer === 'full' ? 2 : 1.5}
+                />
+              ))}
+              <Legend wrapperStyle={{ fontSize: 10 }} />
+              <Tooltip />
+            </RadarChart>
+          </ResponsiveContainer>
+        </Box>
+      ))}
+    </SimpleGrid>
   );
 }
 
@@ -691,7 +782,7 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
     const indStats = stats.filter(s => s.indicator_id === indicatorId);
     if (indStats.length === 0) return null;
 
-    // Unique zones (preserve first-seen name)
+    // Unique zones
     const seen = new Map<string, string>();
     for (const s of indStats) if (!seen.has(s.zone_id)) seen.set(s.zone_id, s.zone_name);
     const zoneList = Array.from(seen.entries()).map(([id, name]) => ({ id, name }));
@@ -701,25 +792,13 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
       return rec?.mean != null ? rec.mean : null;
     };
 
-    // Bar charts per layer
-    const barCharts = DD_LAYERS.map(layer => {
-      const entries = zoneList
-        .map(z => ({ name: z.name, value: getVal(z.id, layer) }))
-        .filter(e => e.value != null) as { name: string; value: number }[];
-      entries.sort((a, b) => b.value - a.value);
-      const maxV = entries.length > 0 ? Math.max(...entries.map(e => e.value)) : 0;
-      const minV = entries.length > 0 ? Math.min(...entries.map(e => e.value)) : 0;
-      return { layer, entries, maxV, minV };
-    });
-
-    // Zone × Layer heatmap matrix
-    const matrix = zoneList.map(z => ({
-      zoneName: z.name,
-      values: DD_LAYERS.map(l => getVal(z.id, l)),
-    }));
-    const allHmVals = matrix.flatMap(r => r.values.filter((v): v is number => v != null));
-    const hmMin = allHmVals.length > 0 ? Math.min(...allHmVals) : 0;
-    const hmMax = allHmVals.length > 0 ? Math.max(...allHmVals) : 1;
+    // Full-layer zone ranking bar
+    const fullEntries = zoneList
+      .map(z => ({ name: z.name, value: getVal(z.id, 'full') }))
+      .filter(e => e.value != null) as { name: string; value: number }[];
+    fullEntries.sort((a, b) => b.value - a.value);
+    const maxV = fullEntries.length > 0 ? Math.max(...fullEntries.map(e => e.value)) : 0;
+    const minV = fullEntries.length > 0 ? Math.min(...fullEntries.map(e => e.value)) : 0;
 
     // Layer statistics (aggregated across zones)
     const layerStats = DD_LAYERS.map(layer => {
@@ -732,12 +811,12 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
       return { layer, n: vals.length, mean, std, cv };
     });
 
-    return { barCharts, matrix, hmMin, hmMax, layerStats };
+    return { fullEntries, maxV, minV, layerStats };
   }, [stats, indicatorId]);
 
   if (!derived) return null;
-  const { barCharts, matrix, hmMin, hmMax, layerStats } = derived;
-  const hmRange = hmMax - hmMin || 1;
+  const { fullEntries, maxV, minV, layerStats } = derived;
+  const range = maxV - minV || 1;
 
   return (
     <Box>
@@ -749,116 +828,45 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
           <Text fontSize="xs" color="gray.500">
             {unit ? `Unit: ${unit}` : ''}
             {unit && targetDirection ? ' | ' : ''}
-            {targetDirection ? `Direction: ${targetDirection} (informational)` : ''}
+            {targetDirection ? `Direction: ${targetDirection}` : ''}
           </Text>
         )}
       </Box>
 
-      {/* Top row: 4 horizontal zone bar charts, one per layer */}
-      <SimpleGrid columns={{ base: 2, md: 4 }} spacing={2} mb={3}>
-        {barCharts.map(bc => (
-          <Box key={bc.layer}>
-            <Text fontSize="xs" fontWeight="bold" mb={1} textAlign="center" color={DD_LAYER_COLORS[bc.layer]}>
-              {DD_LAYER_LABELS[bc.layer]}
-            </Text>
-            {bc.entries.length === 0 ? (
-              <Box h="80px" display="flex" alignItems="center" justifyContent="center" bg="gray.50" borderRadius="md">
-                <Text fontSize="xs" color="gray.400">No data</Text>
-              </Box>
-            ) : (() => {
-              const svgW = 220;
-              const rowH = 16;
-              const svgH = bc.entries.length * rowH + 10;
-              const labelW = 70;
-              const barAreaW = svgW - labelW - 44;
-              const range = bc.maxV - bc.minV || 1;
-              return (
-                <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
-                  {bc.entries.map((e, i) => {
-                    const w = ((e.value - bc.minV) / range) * barAreaW;
-                    const y = i * rowH + 3;
-                    const t = range > 0 ? (e.value - bc.minV) / range : 0.5;
-                    return (
-                      <g key={i}>
-                        <text x={labelW - 4} y={y + rowH * 0.7} fontSize={9} textAnchor="end" fill="#4A5568">
-                          {e.name.length > 10 ? e.name.slice(0, 10) + '…' : e.name}
-                        </text>
-                        <rect x={labelW} y={y + 1} width={Math.max(w, 1)} height={rowH - 4} fill={viridisColor(t)} rx={1} />
-                        <text x={labelW + w + 3} y={y + rowH * 0.7} fontSize={8} fill="#718096">
-                          {e.value.toFixed(2)}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              );
-            })()}
-          </Box>
-        ))}
-      </SimpleGrid>
-
-      {/* Bottom row: Zone × Layer heatmap | Layer Stats | BoxPlot */}
       <SimpleGrid columns={{ base: 1, md: 3 }} spacing={4}>
-        {/* Zone × Layer Heatmap */}
+        {/* Zone ranking bar (full layer only) */}
         <Box>
-          <Text fontSize="xs" fontWeight="bold" mb={1}>Zone × Layer ({unit || 'value'})</Text>
-          {(() => {
-            const cellW = 42;
-            const cellH = 22;
-            const labelW = 85;
-            const headerH = 18;
-            const svgW = labelW + DD_LAYERS.length * cellW + 4;
-            const svgH = headerH + matrix.length * cellH + 4;
+          <Text fontSize="xs" fontWeight="bold" mb={1} color={DD_LAYER_COLORS.full}>Zone Ranking (Full Layer)</Text>
+          {fullEntries.length === 0 ? (
+            <Text fontSize="xs" color="gray.400">No data</Text>
+          ) : (() => {
+            const svgW = 260;
+            const rowH = 18;
+            const svgH = fullEntries.length * rowH + 6;
+            const labelW = 80;
+            const barAreaW = svgW - labelW - 50;
             return (
-              <Box overflowX="auto">
-                <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
-                  {DD_LAYERS.map((l, j) => (
-                    <text key={l} x={labelW + (j + 0.5) * cellW} y={13} fontSize={9} textAnchor="middle" fill="#2D3748" fontWeight="bold">
-                      {DD_LAYER_LABELS[l]}
-                    </text>
-                  ))}
-                  {matrix.map((row, i) => (
+              <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+                {fullEntries.map((e, i) => {
+                  const w = ((e.value - minV) / range) * barAreaW;
+                  const y = i * rowH + 2;
+                  const t = range > 0 ? (e.value - minV) / range : 0.5;
+                  return (
                     <g key={i}>
-                      <text x={labelW - 4} y={headerH + (i + 0.65) * cellH} fontSize={9} textAnchor="end" fill="#4A5568">
-                        {row.zoneName.length > 12 ? row.zoneName.slice(0, 12) + '…' : row.zoneName}
+                      <text x={labelW - 4} y={y + rowH * 0.7} fontSize={9} textAnchor="end" fill="#4A5568">
+                        {e.name.length > 12 ? e.name.slice(0, 12) + '...' : e.name}
                       </text>
-                      {row.values.map((v, j) => {
-                        const t = v != null ? (v - hmMin) / hmRange : 0;
-                        return (
-                          <g key={j}>
-                            <rect
-                              x={labelW + j * cellW}
-                              y={headerH + i * cellH}
-                              width={cellW}
-                              height={cellH}
-                              fill={v != null ? viridisColor(t) : '#F7FAFC'}
-                              stroke="#fff"
-                              strokeWidth={0.5}
-                            />
-                            {v != null && (
-                              <text
-                                x={labelW + (j + 0.5) * cellW}
-                                y={headerH + i * cellH + cellH * 0.65}
-                                fontSize={8}
-                                textAnchor="middle"
-                                fill={t > 0.55 ? '#1A202C' : '#FFFFFF'}
-                                fontWeight="bold"
-                              >
-                                {v.toFixed(2)}
-                              </text>
-                            )}
-                          </g>
-                        );
-                      })}
+                      <rect x={labelW} y={y + 1} width={Math.max(w, 2)} height={rowH - 4} fill={viridisColor(t)} rx={2} />
+                      <text x={labelW + w + 4} y={y + rowH * 0.7} fontSize={8} fill="#718096">{e.value.toFixed(2)}</text>
                     </g>
-                  ))}
-                </svg>
-              </Box>
+                  );
+                })}
+              </svg>
             );
           })()}
         </Box>
 
-        {/* Layer Statistics */}
+        {/* Layer Statistics table */}
         <Box>
           <Text fontSize="xs" fontWeight="bold" mb={1}>Layer Statistics</Text>
           <Box as="table" fontSize="10px" width="100%" sx={{ borderCollapse: 'collapse' }}>
@@ -887,7 +895,7 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
           </Box>
         </Box>
 
-        {/* BoxPlot */}
+        {/* BoxPlot by layer */}
         <Box>
           <Text fontSize="xs" fontWeight="bold" mb={1}>Distribution by Layer</Text>
           <BoxPlotChart stats={stats} indicatorId={indicatorId} />
@@ -1200,6 +1208,8 @@ export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndi
   const perLayer = useMemo(() => {
     return DD_LAYERS.map(layer => {
       // Compute mean/std per indicator across all points in this layer
+      // Use sample std (N-1) for consistency with backend StandardScaler,
+      // and require ≥3 points to avoid degenerate z = ±1 with only 2 points.
       const indStats: Record<string, { mean: number; std: number }> = {};
       for (const ind of indicatorIds) {
         const key = layer === 'full' ? ind : `${ind}__${layer}`;
@@ -1208,9 +1218,9 @@ export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndi
           const v = img.metrics_results[key];
           if (v != null) vals.push(v);
         }
-        if (vals.length < 2) continue;
+        if (vals.length < 3) continue;
         const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-        const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+        const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length - 1);
         const std = Math.sqrt(variance);
         if (std > 0) indStats[ind] = { mean, std };
       }
@@ -1249,7 +1259,16 @@ export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndi
     }).filter(l => l.points.length > 0);
   }, [gpsImages, indicatorIds]);
 
-  if (perLayer.length === 0) return null;
+  if (perLayer.length === 0) {
+    return (
+      <Text fontSize="xs" color="gray.500">
+        Cannot compute cross-indicator spatial maps: need at least 3 GPS images
+        with indicator values that have non-zero variance. This can happen when
+        all indicator values are identical (e.g. calculator colour mismatch) or
+        when too few images have GPS coordinates.
+      </Text>
+    );
+  }
 
   // Categorical color map for dominant indicators (consistent across layers)
   const allDominantInds = Array.from(
@@ -1528,5 +1547,269 @@ export function SilhouetteCurve({ scores, bestK }: SilhouetteCurveProps) {
         <Line type="monotone" dataKey="silhouette" stroke="#3182CE" strokeWidth={2} dot={{ r: 4, fill: '#3182CE' }} activeDot={{ r: 6 }} />
       </LineChart>
     </ResponsiveContainer>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v7.0 — New Tables & Figures
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Fig M1 / S1: Distribution Shape (Violin-like box-whisker) ───────────
+//
+// Recharts doesn't have a native violin — we approximate with a
+// horizontal box-whisker (min/Q1/median/Q3/max) per layer, per indicator.
+
+const VIOLIN_LAYERS = ['full', 'foreground', 'middleground', 'background'] as const;
+const VIOLIN_LAYER_COLORS: Record<string, string> = {
+  full: '#3182CE', foreground: '#E53E3E', middleground: '#38A169', background: '#805AD5',
+};
+
+interface ViolinChartProps {
+  imageRecords: ImageRecord[];
+  indicatorId: string;
+  indicatorName?: string;
+}
+
+export function ViolinChart({ imageRecords, indicatorId, indicatorName }: ViolinChartProps) {
+  const stats = useMemo(() => {
+    return VIOLIN_LAYERS.map(layer => {
+      const vals = imageRecords
+        .filter(r => r.indicator_id === indicatorId && r.layer === layer)
+        .map(r => r.value)
+        .sort((a, b) => a - b);
+      if (vals.length === 0) return null;
+      const q = (p: number) => {
+        const idx = p * (vals.length - 1);
+        const lo = Math.floor(idx);
+        const hi = Math.ceil(idx);
+        return lo === hi ? vals[lo] : vals[lo] * (hi - idx) + vals[hi] * (idx - lo);
+      };
+      return {
+        layer,
+        n: vals.length,
+        min: vals[0],
+        q1: q(0.25),
+        median: q(0.5),
+        q3: q(0.75),
+        max: vals[vals.length - 1],
+        mean: vals.reduce((a, b) => a + b, 0) / vals.length,
+      };
+    }).filter(Boolean) as { layer: string; n: number; min: number; q1: number; median: number; q3: number; max: number; mean: number }[];
+  }, [imageRecords, indicatorId]);
+
+  if (stats.length === 0) return null;
+
+  const svgW = 500;
+  const svgH = 180;
+  const plotL = 60, plotR = svgW - 20, plotT = 20, plotB = svgH - 35;
+  const allVals = stats.flatMap(d => [d.min, d.max]);
+  const yMin = Math.min(...allVals);
+  const yMax = Math.max(...allVals);
+  const yRange = yMax - yMin || 1;
+  const toY = (v: number) => plotB - ((v - yMin) / yRange) * (plotB - plotT);
+  const boxW = Math.min(60, (plotR - plotL) / stats.length - 10);
+
+  return (
+    <Box>
+      {indicatorName && <Text fontSize="xs" fontWeight="bold" mb={1} textAlign="center">{indicatorName} ({indicatorId})</Text>}
+      <Box overflowX="auto">
+        <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+          {/* Y-axis gridlines */}
+          {[0, 0.25, 0.5, 0.75, 1].map(t => {
+            const v = yMin + t * yRange;
+            const y = toY(v);
+            return (
+              <g key={t}>
+                <line x1={plotL} y1={y} x2={plotR} y2={y} stroke="#E2E8F0" />
+                <text x={plotL - 5} y={y + 4} textAnchor="end" fontSize={9} fill="#718096">{v.toFixed(1)}</text>
+              </g>
+            );
+          })}
+          {stats.map((d, i) => {
+            const cx = plotL + (i + 0.5) * ((plotR - plotL) / stats.length);
+            const color = VIOLIN_LAYER_COLORS[d.layer] || '#718096';
+            return (
+              <g key={d.layer}>
+                <line x1={cx} y1={toY(d.min)} x2={cx} y2={toY(d.max)} stroke={color} strokeWidth={1.5} />
+                <line x1={cx - boxW / 4} y1={toY(d.min)} x2={cx + boxW / 4} y2={toY(d.min)} stroke={color} strokeWidth={1.5} />
+                <line x1={cx - boxW / 4} y1={toY(d.max)} x2={cx + boxW / 4} y2={toY(d.max)} stroke={color} strokeWidth={1.5} />
+                <rect x={cx - boxW / 2} y={toY(d.q3)} width={boxW} height={Math.max(1, toY(d.q1) - toY(d.q3))} fill={color} opacity={0.25} stroke={color} strokeWidth={1.5} rx={2} />
+                <line x1={cx - boxW / 2} y1={toY(d.median)} x2={cx + boxW / 2} y2={toY(d.median)} stroke={color} strokeWidth={2.5} />
+                {/* Mean diamond */}
+                <polygon
+                  points={`${cx},${toY(d.mean) - 4} ${cx + 4},${toY(d.mean)} ${cx},${toY(d.mean) + 4} ${cx - 4},${toY(d.mean)}`}
+                  fill="white" stroke={color} strokeWidth={1.5}
+                />
+                <text x={cx} y={plotB + 14} textAnchor="middle" fontSize={10} fill="#4A5568">{d.layer === 'full' ? 'Full' : d.layer === 'foreground' ? 'FG' : d.layer === 'middleground' ? 'MG' : 'BG'}</text>
+                <text x={cx} y={plotB + 26} textAnchor="middle" fontSize={8} fill="#A0AEC0">n={d.n}</text>
+              </g>
+            );
+          })}
+        </svg>
+      </Box>
+    </Box>
+  );
+}
+
+// ─── Multi-indicator violin grid (Fig M1 full layout) ────────────────────
+
+interface ViolinGridProps {
+  imageRecords: ImageRecord[];
+  indicatorDefs: Record<string, IndicatorDefinitionInput>;
+}
+
+export function ViolinGrid({ imageRecords, indicatorDefs }: ViolinGridProps) {
+  const indicatorIds = useMemo(() => {
+    const ids = new Set(imageRecords.map(r => r.indicator_id));
+    return Array.from(ids).sort();
+  }, [imageRecords]);
+
+  if (indicatorIds.length === 0) return null;
+
+  return (
+    <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={4}>
+      {indicatorIds.map(id => (
+        <ViolinChart
+          key={id}
+          imageRecords={imageRecords}
+          indicatorId={id}
+          indicatorName={indicatorDefs[id]?.name}
+        />
+      ))}
+    </SimpleGrid>
+  );
+}
+
+// ─── Table M2: Global Descriptive Statistics ─────────────────────────────
+
+interface GlobalStatsTableProps {
+  stats: GlobalIndicatorStats[];
+}
+
+export function GlobalStatsTable({ stats }: GlobalStatsTableProps) {
+  if (!stats || stats.length === 0) return null;
+
+  const cellW = 70;
+  const nameW = 140;
+  const rowH = 28;
+  const headerH = 50;
+  const cols = ['Full', 'FG', 'MG', 'BG', 'CV%', 'Shapiro p', 'K-W p'];
+  const svgW = nameW + cols.length * cellW;
+  const svgH = headerH + stats.length * rowH + 4;
+
+  function fmtP(p: number | null | undefined): string {
+    if (p == null) return '-';
+    if (p < 0.001) return '<.001';
+    if (p < 0.01) return p.toFixed(3);
+    return p.toFixed(2);
+  }
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {/* Header */}
+        {cols.map((c, ci) => (
+          <text key={c} x={nameW + ci * cellW + cellW / 2} y={headerH - 8} textAnchor="middle" fontSize={9} fontWeight="bold" fill="#4A5568">{c}</text>
+        ))}
+        <text x={4} y={headerH - 8} fontSize={9} fontWeight="bold" fill="#4A5568">Indicator</text>
+        <line x1={0} y1={headerH} x2={svgW} y2={headerH} stroke="#CBD5E0" />
+
+        {stats.map((s, ri) => {
+          const y = headerH + ri * rowH;
+          const layerKeys = ['full', 'foreground', 'middleground', 'background'];
+          const layerVals = layerKeys.map(l => s.by_layer[l]);
+          const cells: string[] = [
+            ...layerVals.map(v => v ? `${v.Mean?.toFixed(1)}±${v.Std?.toFixed(1)}` : '-'),
+            s.cv_full != null ? `${s.cv_full.toFixed(0)}` : '-',
+            fmtP(s.shapiro_p),
+            fmtP(s.kruskal_p),
+          ];
+          const shapiroSig = s.shapiro_p != null && s.shapiro_p < 0.05;
+          const kruskalSig = s.kruskal_p != null && s.kruskal_p < 0.05;
+
+          return (
+            <g key={s.indicator_id}>
+              {ri % 2 === 0 && (
+                <rect x={0} y={y} width={svgW} height={rowH} fill="#F7FAFC" />
+              )}
+              <text x={4} y={y + rowH / 2 + 4} fontSize={9} fill="#2D3748" fontWeight="bold">
+                {s.indicator_id}
+              </text>
+              {cells.map((val, ci) => (
+                <text
+                  key={ci}
+                  x={nameW + ci * cellW + cellW / 2}
+                  y={y + rowH / 2 + 4}
+                  textAnchor="middle"
+                  fontSize={9}
+                  fill={
+                    (ci === 5 && shapiroSig) ? '#E53E3E' :
+                    (ci === 6 && kruskalSig) ? '#E53E3E' :
+                    '#4A5568'
+                  }
+                  fontWeight={(ci === 5 && shapiroSig) || (ci === 6 && kruskalSig) ? 'bold' : 'normal'}
+                >
+                  {val}
+                </text>
+              ))}
+            </g>
+          );
+        })}
+      </svg>
+    </Box>
+  );
+}
+
+// ─── Table M4: Data Quality Diagnostics ──────────────────────────────────
+
+interface DataQualityTableProps {
+  rows: DataQualityRow[];
+}
+
+export function DataQualityTable({ rows }: DataQualityTableProps) {
+  if (!rows || rows.length === 0) return null;
+
+  const cellW = 75;
+  const nameW = 120;
+  const rowH = 26;
+  const headerH = 46;
+  const cols = ['Total N', 'FG %', 'MG %', 'BG %', 'Normal?', 'Corr Method'];
+  const svgW = nameW + cols.length * cellW;
+  const svgH = headerH + rows.length * rowH + 4;
+
+  return (
+    <Box overflowX="auto">
+      <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+        {cols.map((c, ci) => (
+          <text key={c} x={nameW + ci * cellW + cellW / 2} y={headerH - 8} textAnchor="middle" fontSize={9} fontWeight="bold" fill="#4A5568">{c}</text>
+        ))}
+        <text x={4} y={headerH - 8} fontSize={9} fontWeight="bold" fill="#4A5568">Indicator</text>
+        <line x1={0} y1={headerH} x2={svgW} y2={headerH} stroke="#CBD5E0" />
+
+        {rows.map((r, ri) => {
+          const y = headerH + ri * rowH;
+          const cells: string[] = [
+            String(r.total_images),
+            r.fg_coverage_pct != null ? `${r.fg_coverage_pct.toFixed(0)}` : '-',
+            r.mg_coverage_pct != null ? `${r.mg_coverage_pct.toFixed(0)}` : '-',
+            r.bg_coverage_pct != null ? `${r.bg_coverage_pct.toFixed(0)}` : '-',
+            r.is_normal == null ? '-' : r.is_normal ? 'Yes' : 'No',
+            r.correlation_method,
+          ];
+
+          return (
+            <g key={r.indicator_id}>
+              {ri % 2 === 0 && <rect x={0} y={y} width={svgW} height={rowH} fill="#F7FAFC" />}
+              <text x={4} y={y + rowH / 2 + 4} fontSize={9} fill="#2D3748" fontWeight="bold">{r.indicator_id}</text>
+              {cells.map((val, ci) => (
+                <text key={ci} x={nameW + ci * cellW + cellW / 2} y={y + rowH / 2 + 4}
+                  textAnchor="middle" fontSize={9} fill="#4A5568">{val}</text>
+              ))}
+            </g>
+          );
+        })}
+      </svg>
+    </Box>
   );
 }

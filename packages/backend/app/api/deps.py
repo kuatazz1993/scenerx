@@ -75,7 +75,11 @@ def get_vision_client() -> VisionModelClient:
     global _vision_client
     if _vision_client is None:
         settings = get_settings()
-        _vision_client = VisionModelClient(settings.vision_api_url)
+        semantic_config = settings.data_path / "Semantic_configuration.json"
+        _vision_client = VisionModelClient(
+            settings.vision_api_url,
+            semantic_config_path=str(semantic_config),
+        )
     return _vision_client
 
 

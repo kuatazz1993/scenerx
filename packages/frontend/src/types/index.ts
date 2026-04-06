@@ -325,6 +325,44 @@ export interface ComputationMetadata {
   n_indicators: number;
   n_zones: number;
   layers: string[];
+  warnings?: string[];
+}
+
+// v7.0: image-level record (long-format)
+export interface ImageRecord {
+  image_id: string;
+  zone_id: string;
+  zone_name: string;
+  indicator_id: string;
+  layer: string;
+  value: number;
+  lat?: number | null;
+  lng?: number | null;
+}
+
+// v7.0: per-indicator global stats (Table M2)
+export interface GlobalIndicatorStats {
+  indicator_id: string;
+  indicator_name: string;
+  unit: string;
+  target_direction: string;
+  by_layer: Record<string, { N: number; Mean: number; Std: number; Min: number; Max: number }>;
+  cv_full?: number | null;
+  shapiro_w?: number | null;
+  shapiro_p?: number | null;
+  kruskal_h?: number | null;
+  kruskal_p?: number | null;
+}
+
+// v7.0: data quality diagnostics (Table M4)
+export interface DataQualityRow {
+  indicator_id: string;
+  total_images: number;
+  fg_coverage_pct?: number | null;
+  mg_coverage_pct?: number | null;
+  bg_coverage_pct?: number | null;
+  is_normal?: boolean | null;
+  correlation_method: string;
 }
 
 export interface ZoneAnalysisResult {
@@ -335,9 +373,15 @@ export interface ZoneAnalysisResult {
   indicator_definitions: Record<string, IndicatorDefinitionInput>;
   layer_statistics: Record<string, Record<string, { N: number; Mean: number | null; Std: number | null; Min: number | null; Max: number | null }>>;
   radar_profiles: Record<string, Record<string, number>>;
+  radar_profiles_by_layer?: Record<string, Record<string, Record<string, number>>>;
   computation_metadata: ComputationMetadata;
   segment_diagnostics?: ZoneDiagnostic[];
   clustering?: ClusteringResult | null;
+  // v7.0 additions
+  image_records?: ImageRecord[];
+  global_indicator_stats?: GlobalIndicatorStats[];
+  data_quality?: DataQualityRow[];
+  analysis_mode?: 'multi_zone' | 'single_zone';
 }
 
 // Clustering types
@@ -541,3 +585,24 @@ export interface ProjectPipelineResult {
   design_strategies: DesignStrategyResult | null;
   steps: ProjectPipelineProgress[];
 }
+
+export type ProjectPipelineStreamEvent =
+  | {
+      type: 'status';
+      step: string;
+      status: 'completed' | 'failed' | 'skipped' | 'running';
+      detail: string;
+    }
+  | {
+      type: 'progress';
+      step: 'run_calculations';
+      current: number;
+      total: number;
+      image_id: string;
+      image_filename: string;
+      succeeded: number;
+      failed: number;
+      cached: number;
+    }
+  | { type: 'result'; data: ProjectPipelineResult }
+  | { type: 'error'; message: string };

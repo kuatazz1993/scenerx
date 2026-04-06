@@ -1,15 +1,13 @@
 """
-Zone Analyzer Service  (Stage 2.5 — v6.0 Descriptive)
+Zone Analyzer Service  (Stage 2.5 — v7.0 Descriptive)
 Stateless, pure numpy/pandas/scipy — no LLM, no I/O.
 
-Consumes flat zone_statistics records and returns:
+Consumes flat zone_statistics records + image-level records and returns:
   - Enriched records with Z-scores, percentiles (no priority/classification)
   - Zone diagnostics (mean_abs_z, indicator_status — no status/problems)
   - Correlation / p-value matrices by layer
-
-v6.0 Change: All evaluative logic (classify, priority, status, problems)
-removed.  Stage 2 is now purely descriptive.  Direction-dependent evaluation
-belongs to Stage 3 Agent A.
+  - v7.0: global indicator stats (Table M2), data quality (Table M4),
+    mode detection, statistical tests (Shapiro-Wilk, Kruskal-Wallis, CV)
 """
 
 import logging
@@ -27,6 +25,9 @@ from app.models.analysis import (
     EnrichedZoneStat,
     ZoneDiagnostic,
     ComputationMetadata,
+    ImageRecord,
+    GlobalIndicatorStats,
+    DataQualityRow,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,24 @@ class ZoneAnalyzer:
 
         if not raw_by_layer:
             return ZoneAnalysisResult(
-                computation_metadata=ComputationMetadata(n_indicators=0, n_zones=0),
+                computation_metadata=ComputationMetadata(
+                    n_indicators=0, n_zones=0,
+                    warnings=["No zone statistics were provided — nothing to analyze."],
+                ),
             )
 
         # Derive zone/indicator lists from pivoted data
         sample_layer = next(iter(raw_by_layer.values()))
         zone_names: list[str] = list(sample_layer.index)
         ind_ids: list[str] = list(sample_layer.columns)
+
+        warnings: list[str] = []
+        if len(zone_names) < 2:
+            warnings.append(
+                f"Only {len(zone_names)} zone available — cross-zone z-scores "
+                "are undefined (need ≥ 2 zones). All z-score based charts will "
+                "show 0. Add more zones or switch to image-level analysis."
+            )
 
         # 2) Z-scores per layer
         zscore_by_layer: dict[str, pd.DataFrame] = {}
@@ -85,6 +97,41 @@ class ZoneAnalyzer:
                     "Layer '%s': %d indicators have zero variance across zones (z=0 for all zones): %s",
                     layer, len(zero_var_cols), zero_var_cols,
                 )
+                # Surface constant-value indicators to the UI — typically a
+                # sign of an upstream calculator bug (e.g. a colour mismatch
+                # between Vision API output and the calculator's TARGET_RGB
+                # makes every image return the same value).
+                if layer == "full":
+                    const_vals = {
+                        ind: float(df_valid[ind].iloc[0]) for ind in zero_var_cols
+                    }
+                    stuck_at_zero = [ind for ind, v in const_vals.items() if v == 0]
+                    stuck_at_100 = [ind for ind, v in const_vals.items() if v == 100]
+                    other_const = [
+                        f"{ind}={v:.2f}" for ind, v in const_vals.items()
+                        if v != 0 and v != 100
+                    ]
+                    if stuck_at_zero:
+                        warnings.append(
+                            f"{len(stuck_at_zero)} indicator(s) returned 0 for every zone "
+                            f"on the full layer — likely a calculator/mask colour mismatch: "
+                            f"{', '.join(stuck_at_zero[:8])}"
+                            f"{'…' if len(stuck_at_zero) > 8 else ''}"
+                        )
+                    if stuck_at_100:
+                        warnings.append(
+                            f"{len(stuck_at_100)} indicator(s) returned 100 for every zone "
+                            f"on the full layer — check the calculator's target classes and "
+                            f"the semantic_map colour mapping: "
+                            f"{', '.join(stuck_at_100[:8])}"
+                            f"{'…' if len(stuck_at_100) > 8 else ''}"
+                        )
+                    if other_const:
+                        warnings.append(
+                            f"{len(other_const)} indicator(s) have zero variance across zones "
+                            f"(constant value, z-score undefined): {', '.join(other_const[:8])}"
+                            f"{'…' if len(other_const) > 8 else ''}"
+                        )
             scaler = StandardScaler()
             filled = df_valid.fillna(df_valid.mean()).infer_objects(copy=False)
             scaled = scaler.fit_transform(filled)
@@ -154,7 +201,9 @@ class ZoneAnalyzer:
         # 7) Layer-level statistics (mean/std/N across zones, per indicator)
         layer_statistics = self._compute_layer_statistics(raw_by_layer, meta_by_layer)
 
-        # 8) Radar profiles from full-layer percentiles
+        # 8) Radar profiles from percentiles
+        # `radar_profiles`           — full layer only (backward-compat)
+        # `radar_profiles_by_layer`  — all 4 layers (matches notebook Fig 4)
         radar_profiles: dict[str, dict[str, float]] = {}
         if "full" in pct_by_layer:
             pct_full = pct_by_layer["full"]
@@ -166,6 +215,27 @@ class ZoneAnalyzer:
                         if not pd.isna(pct_full.loc[zone, ind_id])
                     }
 
+        radar_profiles_by_layer: dict[str, dict[str, dict[str, float]]] = {}
+        for layer, pct_df in pct_by_layer.items():
+            radar_profiles_by_layer[layer] = {}
+            for zone in zone_names:
+                if zone in pct_df.index:
+                    radar_profiles_by_layer[layer][zone] = {
+                        ind_id: round(float(pct_df.loc[zone, ind_id]), 2)
+                        for ind_id in ind_ids
+                        if not pd.isna(pct_df.loc[zone, ind_id])
+                    }
+
+        # 9) v7.0: global indicator stats + data quality + mode detection
+        image_records = request.image_records
+        global_stats = self._compute_global_indicator_stats(
+            image_records, ind_ids, ind_defs,
+        )
+        data_quality = self._compute_data_quality(
+            image_records, ind_ids, global_stats,
+        )
+        analysis_mode = "multi_zone" if len(zone_names) > 1 else "single_zone"
+
         return ZoneAnalysisResult(
             zone_statistics=enriched,
             zone_diagnostics=diagnostics,
@@ -174,10 +244,16 @@ class ZoneAnalyzer:
             indicator_definitions=ind_defs,
             layer_statistics=layer_statistics,
             radar_profiles=radar_profiles,
+            radar_profiles_by_layer=radar_profiles_by_layer,
             computation_metadata=ComputationMetadata(
                 n_indicators=len(ind_ids),
                 n_zones=len(zone_names),
+                warnings=warnings,
             ),
+            image_records=image_records,
+            global_indicator_stats=global_stats,
+            data_quality=data_quality,
+            analysis_mode=analysis_mode,
         )
 
     # ------------------------------------------------------------------
@@ -309,6 +385,127 @@ class ZoneAnalyzer:
                     "Max": round(float(col.max()), 4) if len(col) > 0 else None,
                 }
         return result
+
+    # ------------------------------------------------------------------
+    # v7.0: global statistics + data quality
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_global_indicator_stats(
+        image_records: list[ImageRecord],
+        ind_ids: list[str],
+        ind_defs: dict,
+    ) -> list[GlobalIndicatorStats]:
+        """Table M2 / S2: per-indicator global descriptive stats with tests."""
+        if not image_records:
+            return []
+
+        # Group image values: (indicator_id, layer) → list[float]
+        by_ind_layer: dict[tuple[str, str], list[float]] = defaultdict(list)
+        for rec in image_records:
+            by_ind_layer[(rec.indicator_id, rec.layer)].append(rec.value)
+
+        results: list[GlobalIndicatorStats] = []
+        for ind_id in ind_ids:
+            defn = ind_defs.get(ind_id)
+            stat = GlobalIndicatorStats(
+                indicator_id=ind_id,
+                indicator_name=defn.name if defn else "",
+                unit=defn.unit if defn else "",
+                target_direction=defn.target_direction if defn else "INCREASE",
+            )
+
+            # Per-layer breakdown
+            for layer in LAYERS:
+                vals = by_ind_layer.get((ind_id, layer), [])
+                if not vals:
+                    continue
+                arr = np.array(vals, dtype=float)
+                stat.by_layer[layer] = {
+                    "N": float(len(arr)),
+                    "Mean": round(float(np.mean(arr)), 4),
+                    "Std": round(float(np.std(arr, ddof=1)), 4) if len(arr) > 1 else 0.0,
+                    "Min": round(float(np.min(arr)), 4),
+                    "Max": round(float(np.max(arr)), 4),
+                }
+
+            # CV (full layer)
+            full_vals = by_ind_layer.get((ind_id, "full"), [])
+            if len(full_vals) > 1:
+                arr_full = np.array(full_vals, dtype=float)
+                mean_f = float(np.mean(arr_full))
+                std_f = float(np.std(arr_full, ddof=1))
+                if mean_f != 0:
+                    stat.cv_full = round(std_f / abs(mean_f) * 100, 2)
+
+                # Shapiro-Wilk (max 5000 samples)
+                try:
+                    sample = arr_full[:5000]
+                    if len(sample) >= 3:
+                        w, p = scipy_stats.shapiro(sample)
+                        stat.shapiro_w = round(float(w), 4)
+                        stat.shapiro_p = round(float(p), 6)
+                except Exception:
+                    pass
+
+            # Kruskal-Wallis across layers
+            layer_groups = [
+                by_ind_layer.get((ind_id, l), [])
+                for l in LAYERS
+            ]
+            layer_groups = [g for g in layer_groups if len(g) >= 2]
+            if len(layer_groups) >= 2:
+                try:
+                    h, p = scipy_stats.kruskal(*layer_groups)
+                    stat.kruskal_h = round(float(h), 4)
+                    stat.kruskal_p = round(float(p), 6)
+                except Exception:
+                    pass
+
+            results.append(stat)
+
+        return results
+
+    @staticmethod
+    def _compute_data_quality(
+        image_records: list[ImageRecord],
+        ind_ids: list[str],
+        global_stats: list[GlobalIndicatorStats],
+    ) -> list[DataQualityRow]:
+        """Table M4 / S4: data quality diagnostics per indicator."""
+        if not image_records:
+            return []
+
+        stats_map = {s.indicator_id: s for s in global_stats}
+        # Count images per (indicator, layer)
+        count_map: dict[tuple[str, str], int] = defaultdict(int)
+        for rec in image_records:
+            count_map[(rec.indicator_id, rec.layer)] += 1
+
+        rows: list[DataQualityRow] = []
+        for ind_id in ind_ids:
+            gs = stats_map.get(ind_id)
+            full_n = count_map.get((ind_id, "full"), 0)
+            fg_n = count_map.get((ind_id, "foreground"), 0)
+            mg_n = count_map.get((ind_id, "middleground"), 0)
+            bg_n = count_map.get((ind_id, "background"), 0)
+
+            is_normal = None
+            corr_method = "pearson"
+            if gs and gs.shapiro_p is not None:
+                is_normal = gs.shapiro_p > 0.05
+                corr_method = "pearson" if is_normal else "spearman"
+
+            rows.append(DataQualityRow(
+                indicator_id=ind_id,
+                total_images=full_n,
+                fg_coverage_pct=round(fg_n / full_n * 100, 1) if full_n > 0 else None,
+                mg_coverage_pct=round(mg_n / full_n * 100, 1) if full_n > 0 else None,
+                bg_coverage_pct=round(bg_n / full_n * 100, 1) if full_n > 0 else None,
+                is_normal=is_normal,
+                correlation_method=corr_method,
+            ))
+        return rows
 
 
 # ---------------------------------------------------------------------------

@@ -317,6 +317,23 @@ class ReportService:
                 }
             summary["layer_statistics"] = ls_compact
 
+        # v7.0 global indicator statistics (CV, normality, layer comparison)
+        if zone_analysis.global_indicator_stats:
+            summary["global_indicator_stats"] = [
+                {
+                    "indicator_id": s.indicator_id,
+                    "cv_full_pct": s.cv_full,
+                    "shapiro_p": s.shapiro_p,
+                    "is_normal": s.shapiro_p > 0.05 if s.shapiro_p is not None else None,
+                    "kruskal_p": s.kruskal_p,
+                    "layers_differ": s.kruskal_p < 0.05 if s.kruskal_p is not None else None,
+                }
+                for s in zone_analysis.global_indicator_stats
+            ]
+
+        # v7.0 analysis mode
+        summary["analysis_mode"] = zone_analysis.analysis_mode or "multi_zone"
+
         # Significant correlations
         sig_pairs = []
         corr = zone_analysis.correlation_by_layer or {}

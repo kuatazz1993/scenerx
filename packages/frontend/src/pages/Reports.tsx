@@ -36,7 +36,6 @@ import {
   AccordionButton,
   AccordionPanel,
   AccordionIcon,
-  Tooltip,
 } from '@chakra-ui/react';
 import { Download, FileText, FileImage, CheckCircle, AlertTriangle, Sparkles, RefreshCw } from 'lucide-react';
 import useAppStore from '../store/useAppStore';
@@ -46,31 +45,16 @@ import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
 import PageHeader from '../components/PageHeader';
 import EmptyState from '../components/EmptyState';
-import {
-  RadarProfileChart,
-  ZonePriorityChart,
-  CorrelationHeatmap,
-  IndicatorComparisonChart,
-  PriorityHeatmap,
-  DescriptiveStatsChart,
-  ZScoreHeatmap,
-  ArchetypeRadarChart,
-  ClusterSizeChart,
-  SpatialScatterByLayer,
-  SilhouetteCurve,
-  IndicatorDeepDive,
-  CrossIndicatorSpatialMaps,
-  Dendrogram,
-  ClusterSpatialBeforeAfter,
-} from '../components/AnalysisCharts';
-import type { ReportRequest, EnrichedZoneStat, ZoneDiagnostic, ZoneDesignOutput, ClusteringResponse } from '../types';
+import { CHART_REGISTRY } from '../components/analysisCharts/registry';
+import { ChartHost } from '../components/analysisCharts/ChartHost';
+import { ChartPicker } from '../components/analysisCharts/ChartPicker';
+import { buildChartContext, LAYERS, LAYER_LABELS } from '../components/analysisCharts/ChartContext';
+import type { ReportRequest, ZoneDiagnostic, ZoneDesignOutput, ClusteringResponse } from '../types';
 
 // ---------------------------------------------------------------------------
-// Constants
+// Non-chart helpers (chart formatting is now in analysisCharts/registry.tsx)
 // ---------------------------------------------------------------------------
 
-const LAYERS = ['full', 'foreground', 'middleground', 'background'];
-const LAYER_LABELS: Record<string, string> = { full: 'Full', foreground: 'FG', middleground: 'MG', background: 'BG' };
 // v6.0: deviation-based coloring (purely descriptive)
 function deviationBgColor(meanAbsZ: number): string {
   if (meanAbsZ >= 1.5) return 'red.50';
@@ -84,19 +68,6 @@ function deviationColorScheme(meanAbsZ: number): string {
   if (meanAbsZ >= 1.0) return 'orange';
   if (meanAbsZ >= 0.5) return 'yellow';
   return 'green';
-}
-
-function formatNum(v: number | null | undefined, decimals = 2): string {
-  if (v === null || v === undefined) return '-';
-  return v.toFixed(decimals);
-}
-
-function significanceStars(p: number | undefined): string {
-  if (p === undefined || p === null) return '';
-  if (p < 0.001) return '***';
-  if (p < 0.01) return '**';
-  if (p < 0.05) return '*';
-  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +163,9 @@ function Reports() {
     setAiReport,
     aiReportMeta,
     setAiReportMeta,
+    hiddenChartIds,
+    toggleChart,
+    resetCharts,
   } = useAppStore();
 
   const projectName = currentProject?.project_name || pipelineResult?.project_name || 'Unknown Project';
@@ -264,8 +238,11 @@ function Reports() {
     if (!zoneAnalysisResult) return;
     toast({ title: 'Generating AI report...', status: 'info', duration: 3000 });
     try {
+      // Strip image_records before sending — they can be 10K+ entries and
+      // the report service doesn't use them.  Keeps the HTTP body small.
+      const { image_records: _ir, ...zoneAnalysisCompact } = zoneAnalysisResult;
       const request: ReportRequest = {
-        zone_analysis: zoneAnalysisResult,
+        zone_analysis: zoneAnalysisCompact as typeof zoneAnalysisResult,
         design_strategies: designStrategyResult ?? undefined,
         stage1_recommendations: recommendations.length > 0 ? recommendations : undefined,
         project_context: currentProject ? {
@@ -306,26 +283,34 @@ function Reports() {
   ];
   const completedSteps = steps.filter(s => s.done).length;
 
-  // Derived data
-  const sortedDiagnostics = useMemo(() => {
-    if (!zoneAnalysisResult) return [];
-    return [...zoneAnalysisResult.zone_diagnostics].sort((a, b) => b.mean_abs_z - a.mean_abs_z);
-  }, [zoneAnalysisResult]);
+  // Unified chart context (memoized — cheap, recomputes only when inputs change)
+  const chartCtx = useMemo(
+    () =>
+      buildChartContext({
+        zoneAnalysisResult,
+        pipelineResult: pipelineResult ?? null,
+        clusteringResult,
+        currentProject: currentProject ?? null,
+        selectedLayer: LAYERS[selectedLayer],
+      }),
+    [zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer],
+  );
 
-  const filteredStats = useMemo(() => {
-    if (!zoneAnalysisResult) return [];
-    const layer = LAYERS[selectedLayer];
-    return zoneAnalysisResult.zone_statistics.filter(s => s.layer === layer);
-  }, [zoneAnalysisResult, selectedLayer]);
-
-  const correlationData = useMemo(() => {
-    if (!zoneAnalysisResult) return null;
-    const layer = LAYERS[selectedLayer];
-    const corr = zoneAnalysisResult.correlation_by_layer?.[layer];
-    const pval = zoneAnalysisResult.pvalue_by_layer?.[layer];
-    if (!corr) return null;
-    return { indicators: Object.keys(corr), corr, pval };
-  }, [zoneAnalysisResult, selectedLayer]);
+  const hiddenSet = useMemo(() => new Set(hiddenChartIds), [hiddenChartIds]);
+  // Unified analysis tab — all 'analysis' charts (formerly split between diagnostics+statistics)
+  const analysisCharts = useMemo(
+    () => CHART_REGISTRY.filter(c => c.tab === 'analysis' && !hiddenSet.has(c.id)),
+    [hiddenSet],
+  );
+  const clusteringCharts = useMemo(
+    () => analysisCharts.filter(c => c.section === 'clustering'),
+    [analysisCharts],
+  );
+  const nonClusteringCharts = useMemo(
+    () => analysisCharts.filter(c => c.section !== 'clustering'),
+    [analysisCharts],
+  );
+  const sortedDiagnostics = chartCtx.sortedDiagnostics;
 
   // Downloads
   const handleDownloadMarkdown = () => {
@@ -428,6 +413,13 @@ function Reports() {
     <PageShell>
       <PageHeader title="Results & Report">
         <HStack spacing={2}>
+          {hasAnalysis && (
+            <ChartPicker
+              hiddenIds={hiddenChartIds}
+              onToggle={toggleChart}
+              onReset={resetCharts}
+            />
+          )}
           <Button size="sm" leftIcon={<Download size={14} />} onClick={handleDownloadMarkdown} isDisabled={!hasAnalysis} colorScheme="blue">
             MD
           </Button>
@@ -463,11 +455,18 @@ function Reports() {
                 ))}
               </HStack>
               {pipelineResult && (
-                <SimpleGrid columns={{ base: 2, md: 4 }} spacing={3}>
+                <SimpleGrid columns={{ base: 2, md: 5 }} spacing={3}>
                   <Box><Text fontSize="xs" color="gray.500">Images</Text><Text fontWeight="bold">{pipelineResult.zone_assigned_images}/{pipelineResult.total_images}</Text></Box>
                   <Box><Text fontSize="xs" color="gray.500">Calculations</Text><Text fontWeight="bold" color="green.600">{pipelineResult.calculations_succeeded} OK</Text></Box>
                   <Box><Text fontSize="xs" color="gray.500">Zone Stats</Text><Text fontWeight="bold">{pipelineResult.zone_statistics_count}</Text></Box>
                   <Box><Text fontSize="xs" color="gray.500">Zones</Text><Text fontWeight="bold">{sortedDiagnostics.length}</Text></Box>
+                  <Box>
+                    <Text fontSize="xs" color="gray.500">GPS Coverage</Text>
+                    <Text fontWeight="bold" color={chartCtx.gpsImages.length > 0 ? 'green.600' : 'gray.400'}>
+                      {chartCtx.gpsImages.length}/{currentProject?.uploaded_images?.length ?? 0}
+                      {currentProject?.uploaded_images?.length ? ` (${Math.round(chartCtx.gpsImages.length / currentProject.uploaded_images.length * 100)}%)` : ''}
+                    </Text>
+                  </Box>
                 </SimpleGrid>
               )}
             </CardBody>
@@ -533,15 +532,38 @@ function Reports() {
           {/* Main Tabs */}
           <Tabs colorScheme="blue" variant="enclosed" mb={6}>
             <TabList>
-              <Tab>Diagnostics</Tab>
-              <Tab>Statistics</Tab>
+              <Tab>Analysis</Tab>
               {hasAnalysis && <Tab>Design Strategies {stage3Failed && <Badge colorScheme="red" ml={1} fontSize="2xs">failed</Badge>}</Tab>}
               <Tab>Indicators</Tab>
             </TabList>
 
             <TabPanels>
-              {/* ── Tab: Diagnostics ── */}
+              {/* ── Tab: Analysis (unified — replaces former Diagnostics + Statistics) ── */}
               <TabPanel px={0}>
+                {/* Computation warnings */}
+                {zoneAnalysisResult?.computation_metadata?.warnings?.length ? (
+                  <Alert status="warning" mb={4} borderRadius="md" alignItems="flex-start">
+                    <AlertIcon />
+                    <Box>
+                      <Text fontWeight="bold" fontSize="sm">Analysis warnings</Text>
+                      <VStack align="stretch" spacing={0} mt={1}>
+                        {zoneAnalysisResult.computation_metadata.warnings.map((w, i) => (
+                          <Text key={i} fontSize="xs" color="gray.700">• {w}</Text>
+                        ))}
+                      </VStack>
+                    </Box>
+                  </Alert>
+                ) : null}
+
+                {/* Layer selector (for layer-aware charts) */}
+                {hasAnalysis && (
+                  <Tabs index={selectedLayer} onChange={setSelectedLayer} colorScheme="green" variant="soft-rounded" mb={4}>
+                    <TabList>
+                      {LAYERS.map(l => <Tab key={l}>{LAYER_LABELS[l]}</Tab>)}
+                    </TabList>
+                  </Tabs>
+                )}
+
                 {sortedDiagnostics.length > 0 && (
                   <VStack spacing={6} align="stretch">
                     {/* Zone Cards */}
@@ -565,83 +587,23 @@ function Reports() {
                       ))}
                     </SimpleGrid>
 
-                    {/* Charts */}
-                    <Card>
-                      <CardHeader><Heading size="sm">Zone Deviation Overview</Heading></CardHeader>
-                      <CardBody><ZonePriorityChart diagnostics={sortedDiagnostics} /></CardBody>
-                    </Card>
+                    {/* All non-clustering analysis charts */}
+                    {nonClusteringCharts.map(chart => (
+                      <ChartHost key={chart.id} descriptor={chart} ctx={chartCtx} onHide={toggleChart} />
+                    ))}
 
-                    <Card>
-                      <CardHeader><Heading size="sm">Priority Heatmap</Heading></CardHeader>
-                      <CardBody><PriorityHeatmap diagnostics={sortedDiagnostics} layer="full" /></CardBody>
-                    </Card>
-
-                    {/* Z-Score Heatmaps (2x2 grid — one per layer, matches Stage2 Fig 2) */}
-                    {zoneAnalysisResult && (
-                      <Card>
-                        <CardHeader><Heading size="sm">Z-Score Heatmaps by Layer</Heading></CardHeader>
-                        <CardBody>
-                          <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-                            {LAYERS.map(layer => (
-                              <Box key={layer}>
-                                <Text fontSize="sm" fontWeight="bold" mb={2} color="gray.600">
-                                  {LAYER_LABELS[layer]} Layer
-                                </Text>
-                                <ZScoreHeatmap stats={zoneAnalysisResult.zone_statistics} layer={layer} />
-                              </Box>
-                            ))}
-                          </SimpleGrid>
-                        </CardBody>
-                      </Card>
-                    )}
-
-                    {/* Spatial Distribution by Layer (Fig 7 — 2x2 grid per indicator) */}
-                    {currentProject && (() => {
-                      const gpsImages = currentProject.uploaded_images.filter(img => img.has_gps && img.latitude != null && img.longitude != null);
-                      if (gpsImages.length === 0) return null;
-                      // Get all indicator IDs that have metrics (any layer)
-                      const indIds = Array.from(new Set(gpsImages.flatMap(img =>
-                        Object.keys(img.metrics_results)
-                          .filter(k => img.metrics_results[k] != null)
-                          .map(k => k.split('__')[0])
-                      ))).sort();
-                      if (indIds.length === 0) return null;
-                      return (
-                        <>
-                          <Card>
-                            <CardHeader>
-                              <HStack justify="space-between">
-                                <Heading size="sm">Spatial Distribution by Layer (Fig 7)</Heading>
-                                <Badge colorScheme="green">{gpsImages.length} GPS images</Badge>
-                              </HStack>
-                            </CardHeader>
-                            <CardBody>
-                              <VStack align="stretch" spacing={6}>
-                                {indIds.map(ind => (
-                                  <SpatialScatterByLayer key={ind} gpsImages={gpsImages} indicatorId={ind} />
-                                ))}
-                              </VStack>
-                            </CardBody>
-                          </Card>
-
-                          <Card>
-                            <CardHeader>
-                              <Heading size="sm">Cross-Indicator Spatial Maps (Fig 8)</Heading>
-                            </CardHeader>
-                            <CardBody>
-                              <CrossIndicatorSpatialMaps gpsImages={gpsImages} indicatorIds={indIds} />
-                            </CardBody>
-                          </Card>
-                        </>
-                      );
-                    })()}
-
-                    {/* Radar */}
-                    {zoneAnalysisResult?.radar_profiles && Object.keys(zoneAnalysisResult.radar_profiles).length > 0 && (
-                      <Card>
-                        <CardHeader><Heading size="sm">Radar Profiles</Heading></CardHeader>
-                        <CardBody><RadarProfileChart radarProfiles={zoneAnalysisResult.radar_profiles} /></CardBody>
-                      </Card>
+                    {/* GPS coverage hint — shown when no spatial charts rendered */}
+                    {chartCtx.gpsImages.length === 0 && (
+                      <Alert status="info" borderRadius="md" variant="left-accent">
+                        <AlertIcon />
+                        <Box>
+                          <Text fontSize="sm" fontWeight="bold">Spatial Distribution Charts unavailable</Text>
+                          <Text fontSize="xs" color="gray.600">
+                            None of the images have GPS coordinates (EXIF lat/lng). Spatial scatter maps require at least a few geo-located images — they don't need 100% coverage.
+                            If some images have GPS, they will appear automatically.
+                          </Text>
+                        </Box>
+                      </Alert>
                     )}
 
                     {/* Clustering */}
@@ -689,216 +651,12 @@ function Reports() {
                       </CardBody>
                     </Card>
 
-                    {/* Cluster Charts */}
-                    {(clusteringResult?.clustering || zoneAnalysisResult?.clustering) && (() => {
-                      const cl = clusteringResult?.clustering || zoneAnalysisResult?.clustering;
-                      if (!cl || cl.archetype_profiles.length === 0) return null;
-                      return (
-                        <>
-                          {cl.silhouette_scores && cl.silhouette_scores.length > 1 && (
-                            <Card>
-                              <CardHeader><Heading size="sm">Silhouette Score Curve</Heading></CardHeader>
-                              <CardBody><SilhouetteCurve scores={cl.silhouette_scores} bestK={cl.k} /></CardBody>
-                            </Card>
-                          )}
-                          {cl.dendrogram_linkage && cl.dendrogram_linkage.length > 0 && (
-                            <Card>
-                              <CardHeader><Heading size="sm">Ward Hierarchical Clustering</Heading></CardHeader>
-                              <CardBody><Dendrogram linkage={cl.dendrogram_linkage} /></CardBody>
-                            </Card>
-                          )}
-                          {cl.point_lats && cl.point_lats.length > 0 && cl.labels_raw && cl.labels_raw.length > 0 && (
-                            <Card>
-                              <CardHeader><Heading size="sm">Cluster Spatial Smoothing</Heading></CardHeader>
-                              <CardBody>
-                                <ClusterSpatialBeforeAfter
-                                  lats={cl.point_lats}
-                                  lngs={cl.point_lngs}
-                                  labelsRaw={cl.labels_raw}
-                                  labelsSmoothed={cl.labels_smoothed}
-                                  archetypeLabels={Object.fromEntries(cl.archetype_profiles.map(a => [a.archetype_id, a.archetype_label]))}
-                                />
-                              </CardBody>
-                            </Card>
-                          )}
-                          <Card>
-                            <CardHeader><Heading size="sm">Archetype Radar Profiles</Heading></CardHeader>
-                            <CardBody><ArchetypeRadarChart archetypes={cl.archetype_profiles} /></CardBody>
-                          </Card>
-                          <Card>
-                            <CardHeader><Heading size="sm">Cluster Size Distribution</Heading></CardHeader>
-                            <CardBody><ClusterSizeChart archetypes={cl.archetype_profiles} /></CardBody>
-                          </Card>
-                        </>
-                      );
-                    })()}
+                    {/* Clustering charts */}
+                    {clusteringCharts.map(chart => (
+                      <ChartHost key={chart.id} descriptor={chart} ctx={chartCtx} onHide={toggleChart} />
+                    ))}
                   </VStack>
                 )}
-              </TabPanel>
-
-              {/* ── Tab: Statistics ── */}
-              <TabPanel px={0}>
-                {hasAnalysis && (
-                  <Tabs index={selectedLayer} onChange={setSelectedLayer} colorScheme="green" variant="soft-rounded" mb={4}>
-                    <TabList>
-                      {LAYERS.map(l => <Tab key={l}>{LAYER_LABELS[l]}</Tab>)}
-                    </TabList>
-                  </Tabs>
-                )}
-
-                {/* Descriptive Statistics */}
-                {zoneAnalysisResult && filteredStats.length > 0 && (
-                  <Card mb={6}>
-                    <CardHeader><Heading size="sm">Descriptive Statistics — {LAYER_LABELS[LAYERS[selectedLayer]]}</Heading></CardHeader>
-                    <CardBody><DescriptiveStatsChart stats={zoneAnalysisResult.zone_statistics} layer={LAYERS[selectedLayer]} /></CardBody>
-                  </Card>
-                )}
-
-                {/* Indicator Comparison */}
-                {zoneAnalysisResult && filteredStats.length > 0 && (
-                  <Card mb={6}>
-                    <CardHeader><Heading size="sm">Indicator Comparison — {LAYER_LABELS[LAYERS[selectedLayer]]}</Heading></CardHeader>
-                    <CardBody><IndicatorComparisonChart stats={zoneAnalysisResult.zone_statistics} layer={LAYERS[selectedLayer]} /></CardBody>
-                  </Card>
-                )}
-
-                {/* Statistics Table */}
-                {filteredStats.length > 0 && (
-                  <Card mb={6}>
-                    <CardHeader><Heading size="sm">Zone Statistics — {LAYER_LABELS[LAYERS[selectedLayer]]}</Heading></CardHeader>
-                    <CardBody p={0}>
-                      <Box overflowX="auto">
-                        <Table size="sm">
-                          <Thead>
-                            <Tr><Th>Zone</Th><Th>Indicator</Th><Th isNumeric>Mean</Th><Th isNumeric>Std</Th><Th isNumeric>Z-score</Th><Th isNumeric>Percentile</Th></Tr>
-                          </Thead>
-                          <Tbody>
-                            {filteredStats.map((stat: EnrichedZoneStat, idx: number) => (
-                              <Tr key={idx}>
-                                <Td fontSize="xs">{stat.zone_name}</Td>
-                                <Td fontSize="xs">{stat.indicator_id}</Td>
-                                <Td isNumeric fontSize="xs">{formatNum(stat.mean)}</Td>
-                                <Td isNumeric fontSize="xs">{formatNum(stat.std)}</Td>
-                                <Td isNumeric fontSize="xs" color={stat.z_score != null ? (stat.z_score < 0 ? 'blue.600' : 'orange.600') : undefined} fontWeight={stat.z_score != null ? 'bold' : undefined}>
-                                  {formatNum(stat.z_score)}
-                                </Td>
-                                <Td isNumeric fontSize="xs">{formatNum(stat.percentile, 0)}</Td>
-                              </Tr>
-                            ))}
-                          </Tbody>
-                        </Table>
-                      </Box>
-                    </CardBody>
-                  </Card>
-                )}
-
-                {/* Correlation Matrix */}
-                {correlationData && (
-                  <>
-                    <Card mb={6}>
-                      <CardHeader><Heading size="sm">Correlation Matrix — {LAYER_LABELS[LAYERS[selectedLayer]]}</Heading></CardHeader>
-                      <CardBody p={0}>
-                        <Box overflowX="auto">
-                          <Table size="sm">
-                            <Thead>
-                              <Tr>
-                                <Th />
-                                {correlationData.indicators.map(ind => (
-                                  <Th key={ind} fontSize="xs" textAlign="center"><Tooltip label={ind}><Text noOfLines={1} maxW="60px">{ind}</Text></Tooltip></Th>
-                                ))}
-                              </Tr>
-                            </Thead>
-                            <Tbody>
-                              {correlationData.indicators.map(row => (
-                                <Tr key={row}>
-                                  <Td fontSize="xs" fontWeight="bold"><Tooltip label={row}><Text noOfLines={1} maxW="80px">{row}</Text></Tooltip></Td>
-                                  {correlationData.indicators.map(col => {
-                                    const val = correlationData.corr[row]?.[col];
-                                    const pval = correlationData.pval?.[row]?.[col];
-                                    const stars = significanceStars(pval);
-                                    const intensity = val != null ? Math.round(Math.abs(val) * 5) * 100 : 0;
-                                    const clampedIntensity = Math.max(50, Math.min(intensity, 500));
-                                    const bg = val != null && intensity > 0 ? (val > 0 ? `blue.${clampedIntensity}` : `red.${clampedIntensity}`) : undefined;
-                                    return (
-                                      <Td key={col} isNumeric fontSize="xs" bg={bg || undefined} color={bg ? 'white' : undefined} textAlign="center">
-                                        {val != null ? `${val.toFixed(2)}${stars}` : '-'}
-                                      </Td>
-                                    );
-                                  })}
-                                </Tr>
-                              ))}
-                            </Tbody>
-                          </Table>
-                        </Box>
-                      </CardBody>
-                    </Card>
-
-                    {correlationData.indicators.length > 0 && (
-                      <Card>
-                        <CardHeader><Heading size="sm">Correlation Heatmap — {LAYER_LABELS[LAYERS[selectedLayer]]}</Heading></CardHeader>
-                        <CardBody><CorrelationHeatmap corr={correlationData.corr} pval={correlationData.pval} indicators={correlationData.indicators} /></CardBody>
-                      </Card>
-                    )}
-                  </>
-                )}
-
-                {/* Radar Profiles Table */}
-                {zoneAnalysisResult?.radar_profiles && Object.keys(zoneAnalysisResult.radar_profiles).length > 0 && (() => {
-                  const zones = Object.keys(zoneAnalysisResult.radar_profiles);
-                  const allIndicators = Array.from(new Set(zones.flatMap(z => Object.keys(zoneAnalysisResult.radar_profiles[z])))).sort();
-                  return (
-                    <Card mt={6}>
-                      <CardHeader><Heading size="sm">Radar Profiles (Percentiles)</Heading></CardHeader>
-                      <CardBody p={0}>
-                        <Box overflowX="auto">
-                          <Table size="sm">
-                            <Thead><Tr><Th>Zone</Th>{allIndicators.map(ind => <Th key={ind} isNumeric>{ind}</Th>)}</Tr></Thead>
-                            <Tbody>
-                              {zones.map(zone => (
-                                <Tr key={zone}>
-                                  <Td fontSize="xs" fontWeight="medium">{zone}</Td>
-                                  {allIndicators.map(ind => {
-                                    const val = zoneAnalysisResult.radar_profiles[zone]?.[ind];
-                                    return <Td key={ind} isNumeric fontSize="xs" bg={val != null ? (val >= 75 ? 'green.50' : val <= 25 ? 'red.50' : undefined) : undefined}>{val != null ? val.toFixed(1) : '-'}</Td>;
-                                  })}
-                                </Tr>
-                              ))}
-                            </Tbody>
-                          </Table>
-                        </Box>
-                      </CardBody>
-                    </Card>
-                  );
-                })()}
-
-                {/* Per-Indicator Deep Dive (Cell 16) */}
-                {zoneAnalysisResult && (() => {
-                  const indIds = Array.from(new Set(zoneAnalysisResult.zone_statistics.map(s => s.indicator_id))).sort();
-                  if (indIds.length === 0) return null;
-                  const indDefs = zoneAnalysisResult.indicator_definitions || {};
-                  return (
-                    <Card mt={6}>
-                      <CardHeader><Heading size="sm">Per-Indicator Deep Dive</Heading></CardHeader>
-                      <CardBody>
-                        <VStack align="stretch" spacing={8} divider={<Box borderTopWidth="1px" borderColor="gray.200" />}>
-                          {indIds.map(ind => {
-                            const def = indDefs[ind];
-                            return (
-                              <IndicatorDeepDive
-                                key={ind}
-                                stats={zoneAnalysisResult.zone_statistics}
-                                indicatorId={ind}
-                                indicatorName={def?.name}
-                                unit={def?.unit}
-                                targetDirection={def?.target_direction}
-                              />
-                            );
-                          })}
-                        </VStack>
-                      </CardBody>
-                    </Card>
-                  );
-                })()}
               </TabPanel>
 
               {/* ── Tab: Design Strategies ── */}

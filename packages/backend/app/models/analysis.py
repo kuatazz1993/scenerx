@@ -35,13 +35,64 @@ class IndicatorLayerValue(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Stage 2 v7.0  --  Image-level + Statistical enrichment
+# (must precede ZoneAnalysisRequest which references ImageRecord)
+# ---------------------------------------------------------------------------
+
+class ImageRecord(BaseModel):
+    """One image × one indicator × one layer measurement (long-format)."""
+    image_id: str
+    zone_id: str = ""
+    zone_name: str = ""
+    indicator_id: str
+    layer: str  # full | foreground | middleground | background
+    value: float
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+
+class GlobalIndicatorStats(BaseModel):
+    """Per-indicator global descriptive statistics (Table M2 / S2).
+
+    Includes per-layer Mean/Std/N, CV, and statistical test results.
+    """
+    indicator_id: str
+    indicator_name: str = ""
+    unit: str = ""
+    target_direction: str = "INCREASE"
+    # Per-layer breakdown: {layer: {N, Mean, Std, Min, Max}}
+    by_layer: dict[str, dict[str, Optional[float]]] = Field(default_factory=dict)
+    # Coefficient of variation (full layer, %)
+    cv_full: Optional[float] = None
+    # Shapiro-Wilk normality test on full-layer image values
+    shapiro_w: Optional[float] = None
+    shapiro_p: Optional[float] = None
+    # Kruskal-Wallis test comparing the 4 layers
+    kruskal_h: Optional[float] = None
+    kruskal_p: Optional[float] = None
+
+
+class DataQualityRow(BaseModel):
+    """Per-indicator data quality diagnostics (Table M4 / S4)."""
+    indicator_id: str
+    total_images: int = 0
+    fg_coverage_pct: Optional[float] = None
+    mg_coverage_pct: Optional[float] = None
+    bg_coverage_pct: Optional[float] = None
+    is_normal: Optional[bool] = None  # Shapiro p > 0.05
+    correlation_method: str = "pearson"  # pearson | spearman
+
+
+# ---------------------------------------------------------------------------
 # Stage 2.5  --  Zone Analysis
 # ---------------------------------------------------------------------------
 
 class ZoneAnalysisRequest(BaseModel):
-    """Request for Stage 2.5 cross-zone statistical analysis (v6.0 descriptive)."""
+    """Request for Stage 2.5 cross-zone statistical analysis (v7.0 descriptive)."""
     indicator_definitions: dict[str, IndicatorDefinitionInput]
     zone_statistics: list[IndicatorLayerValue]
+    # v7.0: image-level records for statistical tests / figures
+    image_records: list[ImageRecord] = Field(default_factory=list)
 
 
 class EnrichedZoneStat(BaseModel):
@@ -83,6 +134,8 @@ class ComputationMetadata(BaseModel):
     layers: list[str] = Field(default_factory=lambda: ["full", "foreground", "middleground", "background"])
     has_spatial_data: bool = False
     has_clustering: bool = False
+    # Non-fatal warnings surfaced to the UI
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ArchetypeProfile(BaseModel):
@@ -129,7 +182,7 @@ class ClusteringResult(BaseModel):
 
 
 class ZoneAnalysisResult(BaseModel):
-    """Complete result of Stage 2.5 zone analysis."""
+    """Complete result of Stage 2.5 zone analysis (v7.0)."""
     zone_statistics: list[EnrichedZoneStat] = Field(default_factory=list)
     zone_diagnostics: list[ZoneDiagnostic] = Field(default_factory=list)
     correlation_by_layer: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
@@ -137,10 +190,20 @@ class ZoneAnalysisResult(BaseModel):
     indicator_definitions: dict[str, IndicatorDefinitionInput] = Field(default_factory=dict)
     layer_statistics: dict[str, dict] = Field(default_factory=dict)
     radar_profiles: dict[str, dict[str, float]] = Field(default_factory=dict)
+    radar_profiles_by_layer: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
     computation_metadata: ComputationMetadata = Field(default_factory=ComputationMetadata)
     # Clustering (optional — requires geo-located image points with ≥20 data points)
     segment_diagnostics: list[ZoneDiagnostic] = Field(default_factory=list)
     clustering: Optional[ClusteringResult] = None
+    # ── v7.0 additions ──
+    # Image-level records (long-format, for violin/scatter/direction figures)
+    image_records: list[ImageRecord] = Field(default_factory=list)
+    # Per-indicator global statistics with statistical tests (Table M2)
+    global_indicator_stats: list[GlobalIndicatorStats] = Field(default_factory=list)
+    # Data quality diagnostics (Table M4)
+    data_quality: list[DataQualityRow] = Field(default_factory=list)
+    # Mode: "multi_zone" (n_zones>1) or "single_zone" (n_zones≤1, uses archetypes)
+    analysis_mode: str = "multi_zone"
 
 
 # ---------------------------------------------------------------------------

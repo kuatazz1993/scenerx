@@ -21,6 +21,7 @@ import type {
   FullAnalysisResult,
   ProjectPipelineRequest,
   ProjectPipelineResult,
+  ProjectPipelineStreamEvent,
   ReportRequest,
   ReportResult,
   ClusteringRequest,
@@ -249,6 +250,41 @@ export const api = {
       apiClient.post<{ task_id: string; status: string; message: string }>('/api/analysis/run-full/async', data),
     runProjectPipeline: (data: ProjectPipelineRequest) =>
       apiClient.post<ProjectPipelineResult>('/api/analysis/project-pipeline', data),
+    runProjectPipelineStream: (
+      data: ProjectPipelineRequest,
+      onEvent: (event: ProjectPipelineStreamEvent) => void,
+      signal?: AbortSignal,
+    ) => {
+      const baseURL = apiClient.defaults.baseURL || '';
+      return fetch(`${baseURL}/api/analysis/project-pipeline/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal,
+      }).then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.trim();
+            if (line.startsWith('data: ')) {
+              try { onEvent(JSON.parse(line.slice(6))); }
+              catch { /* skip malformed */ }
+            }
+          }
+        }
+      });
+    },
     generateReport: (data: ReportRequest) =>
       apiClient.post<ReportResult>('/api/analysis/generate-report', data),
   },

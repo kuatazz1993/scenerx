@@ -3,10 +3,13 @@ Analysis Pipeline API Routes
 Stage 2.5 (zone statistics) + Stage 3 (design strategies)
 """
 
+import asyncio
+import json
 import logging
-from typing import Optional
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.models.analysis import (
@@ -392,56 +395,60 @@ async def run_full_analysis_async(request: FullAnalysisRequest, _user: UserRespo
 # Project Pipeline (images → calculators → aggregation → Stage 2.5 → Stage 3)
 # ---------------------------------------------------------------------------
 
-@router.post("/project-pipeline", response_model=ProjectPipelineResult)
-async def run_project_pipeline(
+async def _execute_project_pipeline(
     request: ProjectPipelineRequest,
-    analyzer: ZoneAnalyzer = Depends(get_zone_analyzer),
-    engine: DesignEngine = Depends(get_design_engine),
-    calculator: MetricsCalculator = Depends(get_metrics_calculator),
-    manager: MetricsManager = Depends(get_metrics_manager),
-    _user: UserResponse = Depends(get_current_user),
-):
-    """Run the full project pipeline: per-image calculations → aggregate → Stage 2.5 → Stage 3."""
+    analyzer: ZoneAnalyzer,
+    engine: DesignEngine,
+    calculator: MetricsCalculator,
+    manager: MetricsManager,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Shared pipeline runner. Yields progress events, finally yields a
+    ``{"type": "result", ...}`` event containing the full ProjectPipelineResult.
+
+    Event shapes:
+      {"type": "status",   "step": str, "detail": str, "status": "completed"|"failed"|"skipped"}
+      {"type": "progress", "step": "run_calculations",
+                           "current": int, "total": int,
+                           "image_id": str, "image_filename": str,
+                           "succeeded": int, "failed": int, "cached": int}
+      {"type": "result",   "data": ProjectPipelineResult dict}
+      {"type": "error",    "message": str}
+    """
     steps: list[ProjectPipelineProgress] = []
     projects_store = get_projects_store()
 
     # 1. Look up project
     project = projects_store.get(request.project_id)
     if not project:
-        raise HTTPException(status_code=404, detail=f"Project not found: {request.project_id}")
+        yield {"type": "error", "message": f"Project not found: {request.project_id}"}
+        return
 
     # 2. Validate indicator_ids
     valid_ids = [ind for ind in request.indicator_ids if manager.has_calculator(ind)]
     if not valid_ids:
-        raise HTTPException(status_code=400, detail="No valid calculator found for any of the provided indicator_ids")
+        yield {"type": "error", "message": "No valid calculator found for any of the provided indicator_ids"}
+        return
     if len(valid_ids) < len(request.indicator_ids):
-        skipped = set(request.indicator_ids) - set(valid_ids)
-        steps.append(ProjectPipelineProgress(
-            step="validate_indicators",
-            status="completed",
-            detail=f"Skipped unknown indicators: {', '.join(skipped)}",
-        ))
+        skipped_ids = set(request.indicator_ids) - set(valid_ids)
+        detail = f"Skipped unknown indicators: {', '.join(skipped_ids)}"
     else:
-        steps.append(ProjectPipelineProgress(step="validate_indicators", status="completed",
-                                             detail=f"{len(valid_ids)} indicators validated"))
+        detail = f"{len(valid_ids)} indicators validated"
+    steps.append(ProjectPipelineProgress(step="validate_indicators", status="completed", detail=detail))
+    yield {"type": "status", "step": "validate_indicators", "status": "completed", "detail": detail}
 
-    # 3. Filter to zone-assigned images (for later aggregation). Per-image
-    # metric calculation is zone-agnostic — it runs on every uploaded image so
-    # that downstream clustering/exploratory analysis can use the full dataset.
+    # 3. Filter to zone-assigned images
     assigned_images = [img for img in project.uploaded_images if img.zone_id]
     if not assigned_images:
-        raise HTTPException(status_code=400, detail="No images assigned to zones in this project")
+        yield {"type": "error", "message": "No images assigned to zones in this project"}
+        return
 
     total_images = len(project.uploaded_images)
     n_unassigned = total_images - len(assigned_images)
     filter_detail = f"{len(assigned_images)} of {total_images} images assigned to zones"
     if n_unassigned:
         filter_detail += f" ({n_unassigned} unassigned — will still get per-image metrics for clustering)"
-    steps.append(ProjectPipelineProgress(
-        step="filter_images",
-        status="completed",
-        detail=filter_detail,
-    ))
+    steps.append(ProjectPipelineProgress(step="filter_images", status="completed", detail=filter_detail))
+    yield {"type": "status", "step": "filter_images", "status": "completed", "detail": filter_detail}
 
     # 4. Run calculations (use semantic_map when available, plus FMB layers)
     calc_run = 0
@@ -454,9 +461,8 @@ async def run_project_pipeline(
         img.metrics_results.clear()
     calculator.clear_cache()
 
-    # Compute per-image metrics for ALL uploaded images (zone-agnostic).
-    # The aggregation step (#5) still only uses zone-assigned images.
-    for img in project.uploaded_images:
+    n_total_images = len(project.uploaded_images)
+    for img_idx, img in enumerate(project.uploaded_images, start=1):
         # Prefer semantic_map mask over raw photo
         image_path = img.mask_filepaths.get("semantic_map", img.filepath)
 
@@ -490,11 +496,7 @@ async def run_project_pipeline(
                     continue
                 calc_run += 1
                 try:
-                    result = calculator.calculate_for_layer(
-                        ind_id,
-                        image_path,
-                        mask_path,
-                    )
+                    result = calculator.calculate_for_layer(ind_id, image_path, mask_path)
                     if result.success and result.value is not None:
                         img.metrics_results[layer_key] = result.value
                         calc_ok += 1
@@ -505,30 +507,42 @@ async def run_project_pipeline(
                     calc_fail += 1
                     logger.error("Layer calc exception %s/%s on %s: %s", ind_id, layer, img.image_id, e)
 
+        # Per-image progress event (yielded after all indicators for this image)
+        yield {
+            "type": "progress",
+            "step": "run_calculations",
+            "current": img_idx,
+            "total": n_total_images,
+            "image_id": img.image_id,
+            "image_filename": img.filename,
+            "succeeded": calc_ok,
+            "failed": calc_fail,
+            "cached": calc_cached,
+        }
+        # Yield control back to the event loop so SSE events actually flush
+        # (calculator.calculate is synchronous and CPU-bound).
+        await asyncio.sleep(0)
+
     # Persist calculated metrics to SQLite
     if calc_ok > 0:
         projects_store.save(project)
 
-    steps.append(ProjectPipelineProgress(
-        step="run_calculations",
-        status="completed" if calc_ok > 0 or calc_run == 0 else "failed",
-        detail=f"Ran {calc_run} new, {calc_cached} cached: {calc_ok} succeeded, {calc_fail} failed",
-    ))
+    calc_detail = f"Ran {calc_run} new, {calc_cached} cached: {calc_ok} succeeded, {calc_fail} failed"
+    calc_status = "completed" if calc_ok > 0 or calc_run == 0 else "failed"
+    steps.append(ProjectPipelineProgress(step="run_calculations", status=calc_status, detail=calc_detail))
+    yield {"type": "status", "step": "run_calculations", "status": calc_status, "detail": calc_detail}
 
     # 5. Aggregate
     calculator_infos = {ind_id: manager.get_calculator(ind_id) for ind_id in valid_ids if manager.get_calculator(ind_id)}
-    zone_statistics, indicator_definitions = MetricsAggregator.aggregate(
+    zone_statistics, indicator_definitions, image_records = MetricsAggregator.aggregate(
         images=assigned_images,
         zones=project.spatial_zones,
         indicator_ids=valid_ids,
         calculator_infos=calculator_infos,
     )
-
-    steps.append(ProjectPipelineProgress(
-        step="aggregate",
-        status="completed",
-        detail=f"{len(zone_statistics)} zone-stat records from {len(set(s.zone_id for s in zone_statistics))} zones",
-    ))
+    agg_detail = f"{len(zone_statistics)} zone-stat records, {len(image_records)} image records from {len(set(s.zone_id for s in zone_statistics))} zones"
+    steps.append(ProjectPipelineProgress(step="aggregate", status="completed", detail=agg_detail))
+    yield {"type": "status", "step": "aggregate", "status": "completed", "detail": agg_detail}
 
     # 6. Stage 2.5 — Zone analysis
     zone_result: Optional[ZoneAnalysisResult] = None
@@ -539,18 +553,23 @@ async def run_project_pipeline(
             zone_request = ZoneAnalysisRequest(
                 indicator_definitions=indicator_definitions,
                 zone_statistics=zone_statistics,
+                image_records=image_records,
             )
             zone_result = analyzer.analyze(zone_request)
-            steps.append(ProjectPipelineProgress(step="zone_analysis", status="completed",
-                                                 detail=f"{len(zone_result.zone_diagnostics)} zone diagnostics"))
+            za_detail = f"{len(zone_result.zone_diagnostics)} zone diagnostics"
+            steps.append(ProjectPipelineProgress(step="zone_analysis", status="completed", detail=za_detail))
+            yield {"type": "status", "step": "zone_analysis", "status": "completed", "detail": za_detail}
         except Exception as e:
             logger.error("Stage 2.5 failed: %s", e, exc_info=True)
             steps.append(ProjectPipelineProgress(step="zone_analysis", status="failed", detail=str(e)))
+            yield {"type": "status", "step": "zone_analysis", "status": "failed", "detail": str(e)}
     else:
         steps.append(ProjectPipelineProgress(step="zone_analysis", status="skipped", detail="No zone statistics to analyze"))
+        yield {"type": "status", "step": "zone_analysis", "status": "skipped", "detail": "No zone statistics to analyze"}
 
     # 7. Stage 3 — Design strategies (non-fatal)
     if request.run_stage3 and zone_result:
+        yield {"type": "status", "step": "design_strategies", "status": "running", "detail": "Generating design strategies…"}
         try:
             project_context = ProjectContext(
                 project={
@@ -583,17 +602,21 @@ async def run_project_pipeline(
                 max_strategies_per_zone=request.max_strategies_per_zone,
             )
             design_result = await engine.generate_design_strategies(design_request)
-            steps.append(ProjectPipelineProgress(step="design_strategies", status="completed",
-                                                 detail=f"{len(design_result.zones)} zones with strategies"))
+            ds_detail = f"{len(design_result.zones)} zones with strategies"
+            steps.append(ProjectPipelineProgress(step="design_strategies", status="completed", detail=ds_detail))
+            yield {"type": "status", "step": "design_strategies", "status": "completed", "detail": ds_detail}
         except Exception as e:
             logger.error("Stage 3 failed (non-fatal): %s", e, exc_info=True)
             steps.append(ProjectPipelineProgress(step="design_strategies", status="failed", detail=str(e)))
+            yield {"type": "status", "step": "design_strategies", "status": "failed", "detail": str(e)}
     elif not request.run_stage3:
         steps.append(ProjectPipelineProgress(step="design_strategies", status="skipped", detail="Stage 3 disabled"))
+        yield {"type": "status", "step": "design_strategies", "status": "skipped", "detail": "Stage 3 disabled"}
     else:
         steps.append(ProjectPipelineProgress(step="design_strategies", status="skipped", detail="No zone analysis result"))
+        yield {"type": "status", "step": "design_strategies", "status": "skipped", "detail": "No zone analysis result"}
 
-    return ProjectPipelineResult(
+    final = ProjectPipelineResult(
         project_id=request.project_id,
         project_name=project.project_name,
         total_images=len(project.uploaded_images),
@@ -606,4 +629,65 @@ async def run_project_pipeline(
         zone_analysis=zone_result,
         design_strategies=design_result,
         steps=steps,
+    )
+    yield {"type": "result", "data": final.model_dump(mode="json")}
+
+
+@router.post("/project-pipeline", response_model=ProjectPipelineResult)
+async def run_project_pipeline(
+    request: ProjectPipelineRequest,
+    analyzer: ZoneAnalyzer = Depends(get_zone_analyzer),
+    engine: DesignEngine = Depends(get_design_engine),
+    calculator: MetricsCalculator = Depends(get_metrics_calculator),
+    manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Run the full project pipeline: per-image calculations → aggregate → Stage 2.5 → Stage 3."""
+    final_result: Optional[dict] = None
+    async for event in _execute_project_pipeline(request, analyzer, engine, calculator, manager):
+        if event.get("type") == "error":
+            raise HTTPException(
+                status_code=404 if "not found" in event["message"].lower() else 400,
+                detail=event["message"],
+            )
+        if event.get("type") == "result":
+            final_result = event["data"]
+
+    if final_result is None:
+        raise HTTPException(status_code=500, detail="Pipeline finished without producing a result")
+    return ProjectPipelineResult(**final_result)
+
+
+@router.post("/project-pipeline/stream")
+async def run_project_pipeline_stream(
+    request: ProjectPipelineRequest,
+    analyzer: ZoneAnalyzer = Depends(get_zone_analyzer),
+    engine: DesignEngine = Depends(get_design_engine),
+    calculator: MetricsCalculator = Depends(get_metrics_calculator),
+    manager: MetricsManager = Depends(get_metrics_manager),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Stream project pipeline progress via Server-Sent Events.
+
+    Emits one ``progress`` event per processed image (so users can see a
+    live counter during multi-hour batch runs), plus ``status`` events for
+    each pipeline stage boundary, and a final ``result`` event carrying the
+    complete ProjectPipelineResult.
+    """
+    async def event_generator():
+        try:
+            async for event in _execute_project_pipeline(request, analyzer, engine, calculator, manager):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error("Project pipeline stream crashed: %s", e, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

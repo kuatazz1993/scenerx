@@ -600,11 +600,23 @@ class RecommendationService:
             return val.get("code", val.get("id", str(val)))
         return str(val) if val is not None else ""
 
+    @staticmethod
+    def _as_name(val) -> str:
+        """Normalize a *name* field. LLM sometimes wraps names in
+        {code, name, definition} dicts because of the C2 prompt rule that
+        requires expanding codes. For name fields we must prefer `name` and
+        fall back to `code` only when `name` is absent — otherwise the UI
+        shows the code (e.g. IND_XXX) instead of the full indicator name."""
+        if isinstance(val, dict):
+            return val.get("name") or val.get("code") or val.get("id") or ""
+        return str(val) if val is not None else ""
+
     def _build_response(self, result: dict, evidence_count: int) -> RecommendationResponse:
         raw_recs = result.get("recommended_indicators", [])
         logger.info("_build_response: %d raw recommended_indicators", len(raw_recs))
 
         _s = self._as_str
+        _n = self._as_name
 
         recommendations: list[IndicatorRecommendation] = []
         for item in raw_recs:
@@ -612,9 +624,21 @@ class RecommendationService:
                 es_raw = item.get("evidence_summary", {})
                 ts_raw = item.get("transferability_summary", {})
 
+                # If indicator_name came back empty or as the raw code (because
+                # the LLM wrapped it in a dict), try to recover the name from
+                # the indicator_id dict — the LLM expands that to
+                # {code, name, definition} per prompt rule C2.
+                name_val = _n(item.get("indicator_name", ""))
+                ind_id_raw = item.get("indicator_id", "")
+                ind_id_val = _s(ind_id_raw)
+                if (not name_val or name_val == ind_id_val) and isinstance(ind_id_raw, dict):
+                    fallback = ind_id_raw.get("name")
+                    if fallback:
+                        name_val = fallback
+
                 rec = IndicatorRecommendation(
-                    indicator_id=_s(item.get("indicator_id", "")),
-                    indicator_name=_s(item.get("indicator_name", "")),
+                    indicator_id=ind_id_val,
+                    indicator_name=name_val,
                     relevance_score=float(item.get("relevance_score", 0)),
                     rationale=_s(item.get("rationale", "")),
                     evidence_ids=es_raw.get("evidence_ids", []),

@@ -19,12 +19,81 @@ logger = logging.getLogger(__name__)
 class VisionModelClient:
     """Async Vision Model API client"""
 
-    def __init__(self, base_url: str, timeout: float = 600.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 600.0,
+        semantic_config_path: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self._health_cache: Optional[bool] = None
         self._health_cache_time: float = 0
         self._config_cache: Optional[dict] = None
+        # Per-class RGB mapping loaded from Semantic_configuration.json.
+        # The Vision API paints the semantic_map using whatever colors we
+        # send, so we MUST send the same colors the downstream calculators
+        # expect (which also load this config) — otherwise exact RGB
+        # matching in the calculators fails and every indicator returns 0%
+        # or weird values (see packages/backend/data/metrics_code/*.py).
+        self._class_colors: dict[str, list[int]] = {}
+        if semantic_config_path:
+            self._load_class_colors(semantic_config_path)
+
+    def _load_class_colors(self, config_path: str) -> None:
+        """Load class-name → RGB mapping from Semantic_configuration.json."""
+        try:
+            path = Path(config_path)
+            if not path.exists():
+                logger.warning(
+                    "Semantic config not found at %s — falling back to "
+                    "generated colors (calculators will likely return 0%%)",
+                    config_path,
+                )
+                return
+            with open(path, encoding="utf-8") as f:
+                config = json.load(f)
+            for item in config:
+                name = item.get("name", "")
+                hex_color = item.get("color", "").lstrip("#")
+                if name and len(hex_color) == 6:
+                    self._class_colors[name] = [
+                        int(hex_color[0:2], 16),
+                        int(hex_color[2:4], 16),
+                        int(hex_color[4:6], 16),
+                    ]
+            logger.info(
+                "VisionModelClient loaded %d class colors from %s",
+                len(self._class_colors), path.name,
+            )
+        except Exception as e:
+            logger.error("Failed to load semantic config colors: %s", e)
+
+    def _colors_for_selected_classes(self, semantic_classes: list[str]) -> dict[str, list[int]]:
+        """Build index-keyed color dict for the Vision API based on the
+        user-selected class list and the colors loaded from the JSON config.
+
+        Falls back to generated colors if the config could not be loaded —
+        in that case downstream calculators will not match, but at least
+        the Vision API can still paint a mask."""
+        if not self._class_colors:
+            return self._generate_colors_for_classes(len(semantic_classes))
+        out: dict[str, list[int]] = {}
+        missing: list[str] = []
+        for idx, class_name in enumerate(semantic_classes):
+            rgb = self._class_colors.get(class_name)
+            if rgb is None:
+                missing.append(class_name)
+                # Use an index-distinct fallback so different unknown classes
+                # don't collide on the same colour.
+                rgb = [(idx * 53) % 256, (idx * 97) % 256, (idx * 37) % 256]
+            out[str(idx)] = rgb
+        if missing:
+            logger.warning(
+                "No config colour for %d class(es) — using synthetic fallbacks: %s",
+                len(missing), missing[:5],
+            )
+        return out
 
     def _get_default_colors(self) -> dict:
         """Get default color configuration"""
@@ -119,8 +188,10 @@ class VisionModelClient:
                     error=f"Image file not found: {image_path}"
                 )
 
-            # Generate colors
-            semantic_colors = self._generate_colors_for_classes(len(request.semantic_classes))
+            # Build colors: prefer the real per-class colours from
+            # Semantic_configuration.json so downstream calculators can match
+            # pixels by RGB. See _load_class_colors() for rationale.
+            semantic_colors = self._colors_for_selected_classes(request.semantic_classes)
 
             # Prepare request data — only fields the Vision API actually uses
             request_data = {

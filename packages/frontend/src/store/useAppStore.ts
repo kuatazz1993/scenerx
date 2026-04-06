@@ -50,6 +50,12 @@ interface AppState {
   // UI State
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
+
+  // Analysis chart visibility (Reports page). Stores only hidden IDs, so new
+  // charts added to the registry default to visible.
+  hiddenChartIds: string[];
+  toggleChart: (id: string) => void;
+  resetCharts: () => void;
 }
 
 export const useAppStore = create<AppState>()(persist((set) => ({
@@ -115,6 +121,16 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   // UI State
   sidebarOpen: true,
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
+
+  // Analysis chart visibility
+  hiddenChartIds: [],
+  toggleChart: (id) =>
+    set((state) => ({
+      hiddenChartIds: state.hiddenChartIds.includes(id)
+        ? state.hiddenChartIds.filter((x) => x !== id)
+        : [...state.hiddenChartIds, id],
+    })),
+  resetCharts: () => set({ hiddenChartIds: [] }),
 }), {
   name: 'scenerx-store',
   partialize: (state) => ({
@@ -130,11 +146,17 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     recommendations: state.recommendations,
     indicatorRelationships: state.indicatorRelationships,
     recommendationSummary: state.recommendationSummary,
-    zoneAnalysisResult: state.zoneAnalysisResult,
+    // Strip image_records from persisted state — they can be 10K+ entries
+    // which blows past localStorage quota. They're re-computed on each
+    // pipeline run and exist only in the in-memory store during the session.
+    zoneAnalysisResult: state.zoneAnalysisResult
+      ? { ...state.zoneAnalysisResult, image_records: [] }
+      : null,
     designStrategyResult: state.designStrategyResult,
     pipelineResult: state.pipelineResult,
     aiReport: state.aiReport,
     aiReportMeta: state.aiReportMeta,
+    hiddenChartIds: state.hiddenChartIds,
   }),
 }));
 

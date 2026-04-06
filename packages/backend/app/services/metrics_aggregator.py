@@ -8,7 +8,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from app.models.analysis import IndicatorDefinitionInput, IndicatorLayerValue
+from app.models.analysis import IndicatorDefinitionInput, IndicatorLayerValue, ImageRecord
 from app.models.project import UploadedImage, SpatialZone
 from app.models.metrics import CalculatorInfo
 
@@ -24,12 +24,12 @@ class MetricsAggregator:
         zones: list[SpatialZone],
         indicator_ids: list[str],
         calculator_infos: dict[str, CalculatorInfo],
-    ) -> tuple[list[IndicatorLayerValue], dict[str, IndicatorDefinitionInput]]:
+    ) -> tuple[list[IndicatorLayerValue], dict[str, IndicatorDefinitionInput], list[ImageRecord]]:
         """
         Aggregate per-image metrics_results into zone-level statistics.
 
         Returns:
-            (zone_statistics, indicator_definitions)
+            (zone_statistics, indicator_definitions, image_records)
         """
         # Build zone lookup
         zone_lookup: dict[str, SpatialZone] = {z.zone_id: z for z in zones}
@@ -39,19 +39,43 @@ class MetricsAggregator:
         # Group values: (zone_id, indicator_id, layer) -> list[float]
         grouped: dict[tuple[str, str, str], list[float]] = defaultdict(list)
 
+        # v7.0: also emit long-format image-level records for violin / scatter
+        image_records: list[ImageRecord] = []
+
         for img in images:
             if not img.zone_id or img.zone_id not in zone_lookup:
                 continue
+            zone = zone_lookup[img.zone_id]
             for ind_id in indicator_ids:
                 # Full layer
                 val = img.metrics_results.get(ind_id)
                 if val is not None:
                     grouped[(img.zone_id, ind_id, "full")].append(val)
+                    image_records.append(ImageRecord(
+                        image_id=img.image_id,
+                        zone_id=img.zone_id,
+                        zone_name=zone.zone_name,
+                        indicator_id=ind_id,
+                        layer="full",
+                        value=val,
+                        lat=img.latitude,
+                        lng=img.longitude,
+                    ))
                 # FMB layers
                 for layer in ["foreground", "middleground", "background"]:
                     val = img.metrics_results.get(f"{ind_id}__{layer}")
                     if val is not None:
                         grouped[(img.zone_id, ind_id, layer)].append(val)
+                        image_records.append(ImageRecord(
+                            image_id=img.image_id,
+                            zone_id=img.zone_id,
+                            zone_name=zone.zone_name,
+                            indicator_id=ind_id,
+                            layer=layer,
+                            value=val,
+                            lat=img.latitude,
+                            lng=img.longitude,
+                        ))
 
         # Build zone statistics
         zone_statistics: list[IndicatorLayerValue] = []
@@ -90,10 +114,11 @@ class MetricsAggregator:
                 )
 
         logger.info(
-            "Aggregated %d zone-stat records from %d images across %d indicators",
+            "Aggregated %d zone-stat records, %d image records from %d images across %d indicators",
             len(zone_statistics),
+            len(image_records),
             len([i for i in images if i.zone_id]),
             len(indicator_ids),
         )
 
-        return zone_statistics, indicator_definitions
+        return zone_statistics, indicator_definitions, image_records
