@@ -6,7 +6,10 @@ Stage 2.5 (zone statistics) + Stage 3 (design strategies)
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
+
+from PIL import Image as PILImage
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -461,10 +464,62 @@ async def _execute_project_pipeline(
         img.metrics_results.clear()
     calculator.clear_cache()
 
-    n_total_images = len(project.uploaded_images)
-    for img_idx, img in enumerate(project.uploaded_images, start=1):
-        # Prefer semantic_map mask over raw photo
-        image_path = img.mask_filepaths.get("semantic_map", img.filepath)
+    # Split images: only calculate on those with a semantic_map from Vision API.
+    # Images without semantic_map would fall back to the raw JPG, producing
+    # meaningless zeros (raw photo pixels don't match semantic colour codes).
+    has_semantic = [img for img in project.uploaded_images if img.mask_filepaths.get("semantic_map")]
+    skipped_images = [img for img in project.uploaded_images if not img.mask_filepaths.get("semantic_map")]
+    if skipped_images:
+        logger.info(
+            "Skipping %d/%d images without semantic_map (not yet analysed by Vision API): %s",
+            len(skipped_images), len(project.uploaded_images),
+            [img.filename for img in skipped_images[:5]],
+        )
+
+    # Semantic map validation is done inline (inside the loop) to avoid
+    # a slow pre-scan that blocks SSE progress events.
+    calc_images = list(has_semantic)
+    invalid_images: list = []
+
+    n_total_images = len(calc_images)
+    logger.info(
+        "Pipeline: %d images with semantic_map, %d without (of %d total)",
+        n_total_images, len(skipped_images), len(project.uploaded_images),
+    )
+    img_idx = 0
+    for img in calc_images:
+        image_path = img.mask_filepaths["semantic_map"]
+
+        # Fast inline validation: check if semantic_map is single-color.
+        # A single-color PNG compresses extremely well, so use file size as
+        # a fast heuristic (no PIL decode needed). If suspiciously small,
+        # do a quick PIL spot-check on a tiny thumbnail.
+        try:
+            sem_file = Path(image_path)
+            file_kb = sem_file.stat().st_size / 1024
+            is_invalid = False
+            if file_kb < 5:
+                # Very small file for any resolution → almost certainly single-color
+                is_invalid = True
+            elif file_kb < 100:
+                # Borderline: do a quick PIL check with a small thumbnail
+                with PILImage.open(image_path) as sem_img:
+                    thumb = sem_img.resize((32, 32), PILImage.NEAREST).convert("RGB")
+                is_invalid = len(set(thumb.getdata())) <= 1
+            if is_invalid:
+                invalid_images.append(img)
+                logger.warning(
+                    "Invalid semantic_map for %s (%s): likely single-color (%.0fKB) — skipping",
+                    img.image_id, img.filename, file_kb,
+                )
+                continue
+        except Exception as e:
+            logger.warning("Cannot validate semantic_map for %s: %s — skipping", img.image_id, e)
+            invalid_images.append(img)
+            continue
+
+        img_idx += 1
+        logger.info("Calculating image %d/%d: %s (%s)", img_idx, n_total_images - len(invalid_images), img.image_id, img.filename)
 
         for ind_id in valid_ids:
             # Full layer
@@ -508,11 +563,12 @@ async def _execute_project_pipeline(
                     logger.error("Layer calc exception %s/%s on %s: %s", ind_id, layer, img.image_id, e)
 
         # Per-image progress event (yielded after all indicators for this image)
+        n_valid = n_total_images - len(invalid_images)
         yield {
             "type": "progress",
             "step": "run_calculations",
             "current": img_idx,
-            "total": n_total_images,
+            "total": n_valid,
             "image_id": img.image_id,
             "image_filename": img.filename,
             "succeeded": calc_ok,
@@ -527,7 +583,14 @@ async def _execute_project_pipeline(
     if calc_ok > 0:
         projects_store.save(project)
 
-    calc_detail = f"Ran {calc_run} new, {calc_cached} cached: {calc_ok} succeeded, {calc_fail} failed"
+    n_skip = len(skipped_images) + len(invalid_images)
+    skip_parts = []
+    if skipped_images:
+        skip_parts.append(f"{len(skipped_images)} no semantic_map")
+    if invalid_images:
+        skip_parts.append(f"{len(invalid_images)} invalid semantic_map")
+    skip_note = f", {n_skip} images skipped ({', '.join(skip_parts)})" if skip_parts else ""
+    calc_detail = f"Ran {calc_run} new, {calc_cached} cached: {calc_ok} succeeded, {calc_fail} failed{skip_note}"
     calc_status = "completed" if calc_ok > 0 or calc_run == 0 else "failed"
     steps.append(ProjectPipelineProgress(step="run_calculations", status=calc_status, detail=calc_detail))
     yield {"type": "status", "step": "run_calculations", "status": calc_status, "detail": calc_detail}

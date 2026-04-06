@@ -11,6 +11,7 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse
 
 from pydantic import BaseModel
 
@@ -300,6 +301,47 @@ async def upload_images(
         "uploaded_count": len(uploaded),
         "images": uploaded,
     }
+
+
+@router.get("/{project_id}/images/{image_id}/thumbnail")
+async def get_image_thumbnail(
+    project_id: str,
+    image_id: str,
+    size: int = Query(default=160, ge=40, le=400),
+):
+    """Return a cached thumbnail for the given image."""
+    store = get_project_store()
+    project = store.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    img = next((i for i in project.uploaded_images if i.image_id == image_id), None)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    original = Path(img.filepath)
+    if not original.exists():
+        raise HTTPException(status_code=404, detail="Image file missing")
+
+    settings = get_settings()
+    thumb_dir = settings.temp_full_path / "thumbnails" / project_id
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = thumb_dir / f"{image_id}_{size}.jpg"
+
+    if not thumb_path.exists():
+        from PIL import Image as PILImage
+
+        with PILImage.open(original) as pil_img:
+            pil_img.thumbnail((size, size))
+            if pil_img.mode in ("RGBA", "P"):
+                pil_img = pil_img.convert("RGB")
+            pil_img.save(thumb_path, "JPEG", quality=75)
+
+    return FileResponse(
+        thumb_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @router.put("/{project_id}/images/batch-zone")

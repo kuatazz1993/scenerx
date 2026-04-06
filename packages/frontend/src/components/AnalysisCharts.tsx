@@ -16,9 +16,6 @@ import {
   Cell,
   ResponsiveContainer,
   ErrorBar,
-  ScatterChart,
-  Scatter,
-  ZAxis,
   LineChart,
   Line,
   ReferenceLine,
@@ -1038,12 +1035,12 @@ export function SpatialScatterMap({ points, indicatorId, vMin: vMinProp, vMax: v
         ))}
         {/* Legend */}
         <defs>
-          <linearGradient id="spatialGrad" x1="0" x2="1" y1="0" y2="0">
+          <linearGradient id={`spatialGrad-${indicatorId ?? 'default'}`} x1="0" x2="1" y1="0" y2="0">
             <stop offset="0%" stopColor={valColor(vMin)} />
             <stop offset="100%" stopColor={valColor(vMax)} />
           </linearGradient>
         </defs>
-        <rect x={margin.l + plotW - 120} y={margin.t + 5} width={100} height={10} fill="url(#spatialGrad)" rx={2} />
+        <rect x={margin.l + plotW - 120} y={margin.t + 5} width={100} height={10} fill={`url(#spatialGrad-${indicatorId ?? 'default'})`} rx={2} />
         <text x={margin.l + plotW - 122} y={margin.t + 14} textAnchor="end" fontSize={8} fill="#718096">{vMin.toFixed(2)}</text>
         <text x={margin.l + plotW - 18} y={margin.t + 14} textAnchor="start" fontSize={8} fill="#718096">{vMax.toFixed(2)}</text>
       </svg>
@@ -1052,7 +1049,7 @@ export function SpatialScatterMap({ points, indicatorId, vMin: vMinProp, vMax: v
 }
 
 
-// ─── Per-Indicator Spatial Scatter by Layer (Fig 7: 2x2 grid) ──────────────
+// ─── Per-Indicator Spatial Scatter — All Layers Combined (Fig 7) ─────────
 
 interface SpatialScatterByLayerProps {
   /** GPS-enabled images (has_gps && latitude != null && longitude != null). */
@@ -1067,47 +1064,97 @@ const LAYER_DEFS: { key: string; label: string; suffix: string }[] = [
   { key: 'background', label: 'BG', suffix: '__background' },
 ];
 
-export function SpatialScatterByLayer({ gpsImages, indicatorId }: SpatialScatterByLayerProps) {
-  const layerPoints = LAYER_DEFS.map(l => {
-    const key = l.suffix ? `${indicatorId}${l.suffix}` : indicatorId;
-    const points = gpsImages
-      .filter(img => img.metrics_results[key] != null)
-      .map(img => ({
-        lat: img.latitude!,
-        lng: img.longitude!,
-        value: img.metrics_results[key]!,
-        label: img.zone_id || img.filename,
-      }));
-    return { ...l, points };
-  });
+const LAYER_SCATTER_COLORS: Record<string, string> = {
+  full: '#718096',
+  foreground: '#E53E3E',
+  middleground: '#38A169',
+  background: '#805AD5',
+};
 
-  // Shared color scale across all 4 layers for cross-layer comparability
-  const allValues = layerPoints.flatMap(lp => lp.points.map(p => p.value));
-  if (allValues.length === 0) return null;
-  const vMin = Math.min(...allValues);
-  const vMax = Math.max(...allValues);
+export function SpatialScatterByLayer({ gpsImages, indicatorId }: SpatialScatterByLayerProps) {
+  // Collect points across all layers into one dataset
+  const allPoints = useMemo(() => {
+    const pts: { lat: number; lng: number; value: number; label: string; layerKey: string; layerLabel: string }[] = [];
+    for (const l of LAYER_DEFS) {
+      const key = l.suffix ? `${indicatorId}${l.suffix}` : indicatorId;
+      for (const img of gpsImages) {
+        const v = img.metrics_results[key];
+        if (v != null && img.latitude != null && img.longitude != null) {
+          pts.push({
+            lat: img.latitude,
+            lng: img.longitude,
+            value: v,
+            label: `${img.zone_id || img.filename} [${l.label}]`,
+            layerKey: l.key,
+            layerLabel: l.label,
+          });
+        }
+      }
+    }
+    return pts;
+  }, [gpsImages, indicatorId]);
+
+  if (allPoints.length === 0) return null;
+
+  const svgW = 500;
+  const svgH = 360;
+  const margin = { l: 56, r: 16, t: 20, b: 44 };
+  const plotW = svgW - margin.l - margin.r;
+  const plotH = svgH - margin.t - margin.b;
+
+  const lngs = allPoints.map(p => p.lng);
+  const lats = allPoints.map(p => p.lat);
+  const lngMin = Math.min(...lngs), lngMax = Math.max(...lngs);
+  const latMin = Math.min(...lats), latMax = Math.max(...lats);
+  const lngRange = lngMax - lngMin || 0.001;
+  const latRange = latMax - latMin || 0.001;
+
+  const toX = (lng: number) => margin.l + ((lng - lngMin) / lngRange) * plotW;
+  const toY = (lat: number) => margin.t + plotH - ((lat - latMin) / latRange) * plotH;
+
+  // Count per layer for legend
+  const layerCounts: Record<string, number> = {};
+  for (const p of allPoints) layerCounts[p.layerKey] = (layerCounts[p.layerKey] || 0) + 1;
+
+  // Render order: full first (bottom), then BG, MG, FG on top
+  const renderOrder = ['full', 'background', 'middleground', 'foreground'];
 
   return (
     <Box>
-      <Text fontSize="sm" fontWeight="bold" mb={2}>
-        {indicatorId}: Spatial Distribution by Layer
-      </Text>
-      <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
-        {layerPoints.map(lp => (
-          <Box key={lp.key}>
-            <Text fontSize="xs" fontWeight="bold" mb={1} color="gray.600" textAlign="center">
-              {lp.label} (n={lp.points.length})
-            </Text>
-            {lp.points.length > 0 ? (
-              <SpatialScatterMap points={lp.points} vMin={vMin} vMax={vMax} compact />
-            ) : (
-              <Box h="260px" display="flex" alignItems="center" justifyContent="center" bg="gray.50" borderRadius="md">
-                <Text fontSize="xs" color="gray.400">No data</Text>
-              </Box>
-            )}
-          </Box>
-        ))}
-      </SimpleGrid>
+      <Text fontSize="sm" fontWeight="bold" mb={2}>{indicatorId}</Text>
+      <Box overflowX="auto">
+        <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+          <line x1={margin.l} y1={margin.t} x2={margin.l} y2={margin.t + plotH} stroke="#CBD5E0" />
+          <line x1={margin.l} y1={margin.t + plotH} x2={margin.l + plotW} y2={margin.t + plotH} stroke="#CBD5E0" />
+          <text x={svgW / 2} y={svgH - 5} textAnchor="middle" fontSize={10} fill="#718096">Longitude</text>
+          <text x={12} y={svgH / 2} textAnchor="middle" fontSize={10} fill="#718096" transform={`rotate(-90, 12, ${svgH / 2})`}>Latitude</text>
+          {renderOrder.map(layerKey =>
+            allPoints
+              .filter(p => p.layerKey === layerKey)
+              .map((p, i) => (
+                <circle
+                  key={`${layerKey}-${i}`}
+                  cx={toX(p.lng)}
+                  cy={toY(p.lat)}
+                  r={5.5}
+                  fill={LAYER_SCATTER_COLORS[layerKey] || '#A0AEC0'}
+                  stroke="#fff"
+                  strokeWidth={0.8}
+                  opacity={0.8}
+                >
+                  <title>{`${p.label}: ${p.value.toFixed(3)}`}</title>
+                </circle>
+              ))
+          )}
+          {/* Layer legend */}
+          {LAYER_DEFS.filter(l => layerCounts[l.key]).map((l, i) => (
+            <g key={l.key} transform={`translate(${margin.l + 8}, ${margin.t + 8 + i * 18})`}>
+              <circle cx={6} cy={0} r={5} fill={LAYER_SCATTER_COLORS[l.key]} stroke="#fff" strokeWidth={0.8} opacity={0.8} />
+              <text x={16} y={4} fontSize={9} fill="#4A5568">{l.label} (n={layerCounts[l.key]})</text>
+            </g>
+          ))}
+        </svg>
+      </Box>
     </Box>
   );
 }
@@ -1182,7 +1229,7 @@ function renderCrossScatter(
       <text x={svgW / 2} y={svgH - 4} textAnchor="middle" fontSize={9} fill="#718096">Longitude</text>
       <text x={12} y={svgH / 2} textAnchor="middle" fontSize={9} fill="#718096" transform={`rotate(-90, 12, ${svgH / 2})`}>Latitude</text>
       {points.map((p, i) => (
-        <circle key={i} cx={toX(p.lng)} cy={toY(p.lat)} r={3.5} fill={getColor(p)} stroke="#fff" strokeWidth={0.4} opacity={0.85}>
+        <circle key={i} cx={toX(p.lng)} cy={toY(p.lat)} r={5.5} fill={getColor(p)} stroke="#fff" strokeWidth={0.8} opacity={0.85}>
           <title>{`${p.label || ''} (${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}): ${valueFn(p)}`}</title>
         </circle>
       ))}
@@ -1205,81 +1252,73 @@ function renderCrossScatter(
 }
 
 export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndicatorSpatialMapsProps) {
-  const perLayer = useMemo(() => {
-    return DD_LAYERS.map(layer => {
-      // Compute mean/std per indicator across all points in this layer
-      // Use sample std (N-1) for consistency with backend StandardScaler,
-      // and require ≥3 points to avoid degenerate z = ±1 with only 2 points.
-      const indStats: Record<string, { mean: number; std: number }> = {};
-      for (const ind of indicatorIds) {
-        const key = layer === 'full' ? ind : `${ind}__${layer}`;
-        const vals: number[] = [];
-        for (const img of gpsImages) {
-          const v = img.metrics_results[key];
-          if (v != null) vals.push(v);
-        }
-        if (vals.length < 3) continue;
-        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-        const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length - 1);
-        const std = Math.sqrt(variance);
-        if (std > 0) indStats[ind] = { mean, std };
-      }
-
-      // Per point: compute z-scores, mean_abs_z, most_distinctive
-      const points: CrossPoint[] = [];
+  // Compute only for full layer (aggregated view — per-layer breakdown in Deep Dive)
+  const points = useMemo(() => {
+    // Mean/std per indicator across all GPS points (full layer)
+    const indStats: Record<string, { mean: number; std: number }> = {};
+    for (const ind of indicatorIds) {
+      const vals: number[] = [];
       for (const img of gpsImages) {
-        if (img.latitude == null || img.longitude == null) continue;
-        let sumAbsZ = 0;
-        let count = 0;
-        let bestInd = '';
-        let bestAbsZ = -1;
-        for (const ind of indicatorIds) {
-          const stats = indStats[ind];
-          if (!stats) continue;
-          const key = layer === 'full' ? ind : `${ind}__${layer}`;
-          const val = img.metrics_results[key];
-          if (val == null) continue;
-          const z = (val - stats.mean) / stats.std;
-          const absZ = Math.abs(z);
-          sumAbsZ += absZ;
-          count++;
-          if (absZ > bestAbsZ) { bestAbsZ = absZ; bestInd = ind; }
-        }
-        if (count === 0) continue;
-        points.push({
-          lat: img.latitude,
-          lng: img.longitude,
-          label: img.zone_id || img.filename,
-          meanAbsZ: sumAbsZ / count,
-          mostDistinctive: bestInd,
-        });
+        const v = img.metrics_results[ind];
+        if (v != null) vals.push(v);
       }
+      if (vals.length < 3) continue;
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length - 1);
+      const std = Math.sqrt(variance);
+      if (std > 0) indStats[ind] = { mean, std };
+    }
 
-      return { layer, points };
-    }).filter(l => l.points.length > 0);
+    // Per point: z-scores, mean_abs_z, most_distinctive
+    const pts: CrossPoint[] = [];
+    for (const img of gpsImages) {
+      if (img.latitude == null || img.longitude == null) continue;
+      let sumAbsZ = 0;
+      let count = 0;
+      let bestInd = '';
+      let bestAbsZ = -1;
+      for (const ind of indicatorIds) {
+        const stats = indStats[ind];
+        if (!stats) continue;
+        const val = img.metrics_results[ind];
+        if (val == null) continue;
+        const z = (val - stats.mean) / stats.std;
+        const absZ = Math.abs(z);
+        sumAbsZ += absZ;
+        count++;
+        if (absZ > bestAbsZ) { bestAbsZ = absZ; bestInd = ind; }
+      }
+      if (count === 0) continue;
+      pts.push({
+        lat: img.latitude,
+        lng: img.longitude,
+        label: img.zone_id || img.filename,
+        meanAbsZ: sumAbsZ / count,
+        mostDistinctive: bestInd,
+      });
+    }
+    return pts;
   }, [gpsImages, indicatorIds]);
 
-  if (perLayer.length === 0) {
+  if (points.length === 0) {
     return (
       <Text fontSize="xs" color="gray.500">
         Cannot compute cross-indicator spatial maps: need at least 3 GPS images
-        with indicator values that have non-zero variance. This can happen when
-        all indicator values are identical (e.g. calculator colour mismatch) or
-        when too few images have GPS coordinates.
+        with indicator values that have non-zero variance.
       </Text>
     );
   }
 
-  // Categorical color map for dominant indicators (consistent across layers)
+  // Categorical color map for dominant indicators
   const allDominantInds = Array.from(
-    new Set(perLayer.flatMap(l => l.points.map(p => p.mostDistinctive)))
+    new Set(points.map(p => p.mostDistinctive))
   ).sort();
   const indColor: Record<string, string> = {};
   allDominantInds.forEach((ind, i) => { indColor[ind] = CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length]; });
 
   return (
     <Box>
-      {/* Shared legend for dominant indicators */}
+      {/* Legend for dominant indicators */}
       <Box mb={3} display="flex" flexWrap="wrap" gap={2}>
         <Text fontSize="xs" fontWeight="bold" color="gray.600" mr={1}>Dominant indicator:</Text>
         {allDominantInds.map(ind => (
@@ -1290,39 +1329,31 @@ export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndi
         ))}
       </Box>
 
-      <Box display="flex" flexDirection="column" gap={4}>
-        {perLayer.map(({ layer, points }) => (
-          <Box key={layer}>
-            <Text fontSize="sm" fontWeight="bold" color={DD_LAYER_COLORS[layer]} mb={1}>
-              {DD_LAYER_LABELS[layer]} (n={points.length})
-            </Text>
-            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
-              <Box>
-                <Text fontSize="xs" textAlign="center" mb={1} color="gray.600">
-                  Deviation from Average (Mean |Z|)
-                </Text>
-                {renderCrossScatter(
-                  points,
-                  'gradient',
-                  p => ylOrRdColor(p.meanAbsZ / 2),  // matches notebook vmax=2
-                  p => `Mean |Z| = ${p.meanAbsZ.toFixed(3)}`,
-                )}
-              </Box>
-              <Box>
-                <Text fontSize="xs" textAlign="center" mb={1} color="gray.600">
-                  Most Distinctive Indicator
-                </Text>
-                {renderCrossScatter(
-                  points,
-                  'categorical',
-                  p => indColor[p.mostDistinctive] || '#A0AEC0',
-                  p => `${p.mostDistinctive} (|Z| highest)`,
-                )}
-              </Box>
-            </SimpleGrid>
-          </Box>
-        ))}
-      </Box>
+      <Text fontSize="xs" color="gray.500" mb={2}>n={points.length} GPS images</Text>
+      <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
+        <Box>
+          <Text fontSize="xs" textAlign="center" mb={1} color="gray.600">
+            Deviation from Average (Mean |Z|)
+          </Text>
+          {renderCrossScatter(
+            points,
+            'gradient',
+            p => ylOrRdColor(p.meanAbsZ / 2),
+            p => `Mean |Z| = ${p.meanAbsZ.toFixed(3)}`,
+          )}
+        </Box>
+        <Box>
+          <Text fontSize="xs" textAlign="center" mb={1} color="gray.600">
+            Most Distinctive Indicator
+          </Text>
+          {renderCrossScatter(
+            points,
+            'categorical',
+            p => indColor[p.mostDistinctive] || '#A0AEC0',
+            p => `${p.mostDistinctive} (|Z| highest)`,
+          )}
+        </Box>
+      </SimpleGrid>
     </Box>
   );
 }

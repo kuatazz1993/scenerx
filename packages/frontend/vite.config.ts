@@ -6,11 +6,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api/uploads': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-      },
-      '/api/masks': {
+      '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
       },

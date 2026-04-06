@@ -25,19 +25,20 @@ interface ChartPickerProps {
 const TAB_LABELS: Record<ChartTab, string> = {
   diagnostics: 'Diagnostics',
   statistics: 'Statistics',
+  analysis: 'Analysis',
 };
 
 export function ChartPicker({ hiddenIds, onToggle, onReset }: ChartPickerProps) {
   const hiddenSet = new Set(hiddenIds);
 
   // Group registry entries by tab, preserving in-tab ordering
-  const grouped = CHART_REGISTRY.reduce<Record<ChartTab, ChartDescriptor[]>>(
+  const grouped = CHART_REGISTRY.reduce<Partial<Record<ChartTab, ChartDescriptor[]>>>(
     (acc, c) => {
       if (!acc[c.tab]) acc[c.tab] = [];
-      acc[c.tab].push(c);
+      acc[c.tab]!.push(c);
       return acc;
     },
-    { diagnostics: [], statistics: [] },
+    {},
   );
 
   const nHidden = hiddenSet.size;
@@ -60,7 +61,10 @@ export function ChartPicker({ hiddenIds, onToggle, onReset }: ChartPickerProps) 
         </PopoverHeader>
         <PopoverBody maxH="460px" overflowY="auto">
           <VStack align="stretch" spacing={4}>
-            {(Object.keys(grouped) as ChartTab[]).map((tab) => (
+            {(Object.keys(grouped) as ChartTab[]).map((tab) => {
+              const charts = grouped[tab] ?? [];
+              if (charts.length === 0) return null;
+              return (
               <Box key={tab}>
                 <HStack mb={2}>
                   <Text
@@ -70,14 +74,14 @@ export function ChartPicker({ hiddenIds, onToggle, onReset }: ChartPickerProps) 
                     textTransform="uppercase"
                     letterSpacing="wide"
                   >
-                    {TAB_LABELS[tab]}
+                    {TAB_LABELS[tab] ?? tab}
                   </Text>
                   <Text fontSize="xs" color="gray.400">
-                    ({grouped[tab].length})
+                    ({charts.length})
                   </Text>
                 </HStack>
                 <VStack align="stretch" spacing={1} pl={1}>
-                  {grouped[tab].map((c) => (
+                  {charts.map((c) => (
                     <Checkbox
                       key={c.id}
                       size="sm"
@@ -96,7 +100,8 @@ export function ChartPicker({ hiddenIds, onToggle, onReset }: ChartPickerProps) 
                   ))}
                 </VStack>
               </Box>
-            ))}
+              );
+            })}
           </VStack>
         </PopoverBody>
         <PopoverFooter>

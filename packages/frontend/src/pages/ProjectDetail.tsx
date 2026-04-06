@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Box,
@@ -11,7 +11,6 @@ import {
   CardBody,
   Text,
   Badge,
-  IconButton,
   Tag,
   Wrap,
   WrapItem,
@@ -22,18 +21,14 @@ import {
   Select,
   Spinner,
 } from '@chakra-ui/react';
-import { Upload, FolderUp, X, Undo2, MapPin, Trash2 } from 'lucide-react';
+import { Upload, FolderUp, MapPin, Trash2 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../api';
 import useAppToast from '../hooks/useAppToast';
 import type { UploadedImage } from '../types';
 import PageShell from '../components/PageShell';
 import EmptyState from '../components/EmptyState';
-
-/** Build the static-file URL for a project image. */
-function imageUrl(projectId: string, img: UploadedImage): string {
-  return `/api/uploads/${projectId}/${img.image_id}_${img.filename}`;
-}
+import { ZoneImageTile, UngroupedImageTile } from '../components/ImageTile';
 
 function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -232,7 +227,7 @@ function ProjectDetail() {
     }
   };
 
-  const handleUnassign = async (imageId: string) => {
+  const handleUnassign = useCallback(async (imageId: string) => {
     try {
       await api.projects.assignImageZone(projectId!, imageId, null);
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -240,7 +235,7 @@ function ProjectDetail() {
     } catch {
       toast({ title: 'Failed to unassign image', status: 'error' });
     }
-  };
+  }, [projectId, queryClient, toast]);
 
   const handleZoneUpload = async (zoneId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -273,17 +268,16 @@ function ProjectDetail() {
     if (ref) ref.value = '';
   };
 
-  const matchesGpsFilter = (img: UploadedImage) => {
+  const matchesGpsFilter = useCallback((img: UploadedImage) => {
     if (gpsFilter === 'all') return true;
     if (gpsFilter === 'has') return !!img.has_gps;
     return !img.has_gps;
-  };
+  }, [gpsFilter]);
 
-  const handleImageClick = (imageId: string, index: number, e: React.MouseEvent) => {
+  const handleImageClick = useCallback((imageId: string, index: number, e: React.MouseEvent) => {
     const ungrouped = (project?.uploaded_images.filter(img => !img.zone_id) || []).filter(matchesGpsFilter);
 
     if (e.shiftKey && lastClickedIndex.current >= 0) {
-      // Shift+Click: select range between last click and current
       const start = Math.min(lastClickedIndex.current, index);
       const end = Math.max(lastClickedIndex.current, index);
       setSelectedImageIds(prev => {
@@ -294,7 +288,6 @@ function ProjectDetail() {
         return next;
       });
     } else {
-      // Normal click: toggle single image
       setSelectedImageIds(prev => {
         const next = new Set(prev);
         if (next.has(imageId)) next.delete(imageId);
@@ -303,7 +296,7 @@ function ProjectDetail() {
       });
     }
     lastClickedIndex.current = index;
-  };
+  }, [project?.uploaded_images, matchesGpsFilter]);
 
   const deleteImageMutation = useMutation({
     mutationFn: (imageId: string) => api.projects.deleteImage(projectId!, imageId),
@@ -326,12 +319,41 @@ function ProjectDetail() {
     },
   });
 
+  const handleDeleteImage = useCallback(
+    (imageId: string) => deleteImageMutation.mutate(imageId),
+    [deleteImageMutation],
+  );
+
   const handleBatchDelete = () => {
     if (selectedImageIds.size === 0) return;
     const count = selectedImageIds.size;
     if (!window.confirm(`Delete ${count} image(s)? This cannot be undone.`)) return;
     batchDeleteMutation.mutate(Array.from(selectedImageIds));
   };
+
+  // All hooks MUST be above early returns (Rules of Hooks)
+  const images = project?.uploaded_images ?? [];
+  const ungroupedImages = useMemo(
+    () => images.filter(img => !img.zone_id),
+    [images],
+  );
+  const visibleUngrouped = useMemo(
+    () => ungroupedImages.filter(matchesGpsFilter),
+    [ungroupedImages, matchesGpsFilter],
+  );
+  const zoneImagesMap = useMemo(() => {
+    const map: Record<string, UploadedImage[]> = {};
+    for (const img of images) {
+      if (img.zone_id) {
+        (map[img.zone_id] ||= []).push(img);
+      }
+    }
+    return map;
+  }, [images]);
+
+  const assignedCount = useMemo(() => images.filter(i => i.zone_id).length, [images]);
+  const gpsCount = useMemo(() => images.filter(i => i.has_gps).length, [images]);
+  const ungroupedGpsCount = useMemo(() => ungroupedImages.filter(i => i.has_gps).length, [ungroupedImages]);
 
   if (isLoading) {
     return <PageShell isLoading loadingText="Loading project..." />;
@@ -351,16 +373,8 @@ function ProjectDetail() {
     );
   }
 
-  const ungroupedImages = project.uploaded_images.filter(img => !img.zone_id);
-  const visibleUngrouped = ungroupedImages.filter(matchesGpsFilter);
-  const getZoneImages = (zoneId: string) =>
-    project.uploaded_images.filter(img => img.zone_id === zoneId);
-
-  const assignedCount = project.uploaded_images.filter(i => i.zone_id).length;
-  const gpsCount = project.uploaded_images.filter(i => i.has_gps).length;
-  const ungroupedGpsCount = ungroupedImages.filter(i => i.has_gps).length;
   const hasZones = project.spatial_zones.length > 0;
-  const hasImages = project.uploaded_images.length > 0;
+  const hasImages = images.length > 0;
   const isReady = hasZones && hasImages && assignedCount > 0;
 
   return (
@@ -518,7 +532,7 @@ function ProjectDetail() {
 
       {/* Zone cards with images */}
       {project.spatial_zones.map(zone => {
-        const zoneImages = getZoneImages(zone.zone_id);
+        const zoneImages = zoneImagesMap[zone.zone_id] || [];
         const isThisZoneUploading = zoneUploading === zone.zone_id;
         return (
           <Card key={zone.zone_id} mb={3}>
@@ -569,57 +583,16 @@ function ProjectDetail() {
                   <Box maxH="300px" overflowY="auto" borderRadius="md">
                     <SimpleGrid columns={{ base: 4, md: 6, lg: 8 }} spacing={2}>
                       {zoneImages.slice(0, zoneVisibleCount[zone.zone_id] || ZONE_PAGE_SIZE).map(img => (
-                        <Box key={img.image_id} position="relative" role="group">
-                          <Box
-                            h="80px"
-                            w="100%"
-                            borderRadius="md"
-                            bg="gray.200"
-                            backgroundImage={`url(${imageUrl(project.id, img)})`}
-                            backgroundSize="cover"
-                            backgroundPosition="center"
-                          />
-                          <IconButton
-                            aria-label="Unassign from zone"
-                            icon={<Undo2 size={12} />}
-                            size="xs"
-                            position="absolute"
-                            top={1}
-                            left={1}
-                            colorScheme="yellow"
-                            title="Move back to ungrouped"
-                            opacity={0}
-                            _groupHover={{ opacity: 1 }}
-                            onClick={() => handleUnassign(img.image_id)}
-                          />
-                          <IconButton
-                            aria-label="Delete"
-                            icon={<X size={12} />}
-                            size="xs"
-                            position="absolute"
-                            top={1}
-                            right={1}
-                            colorScheme="red"
-                            opacity={0}
-                            _groupHover={{ opacity: 1 }}
-                            onClick={() => deleteImageMutation.mutate(img.image_id)}
-                          />
-                          {img.has_gps && (
-                            <Box
-                              position="absolute"
-                              bottom={1}
-                              left={1}
-                              bg="teal.500"
-                              color="white"
-                              borderRadius="sm"
-                              p="2px"
-                              title={`GPS: ${img.latitude?.toFixed(4)}, ${img.longitude?.toFixed(4)}`}
-                              pointerEvents="none"
-                            >
-                              <MapPin size={10} />
-                            </Box>
-                          )}
-                        </Box>
+                        <ZoneImageTile
+                          key={img.image_id}
+                          projectId={project.id}
+                          imageId={img.image_id}
+                          hasGps={img.has_gps}
+                          latitude={img.latitude}
+                          longitude={img.longitude}
+                          onUnassign={handleUnassign}
+                          onDelete={handleDeleteImage}
+                        />
                       ))}
                     </SimpleGrid>
                   </Box>
@@ -745,59 +718,19 @@ function ProjectDetail() {
             <Box maxH="400px" overflowY="auto" borderRadius="md">
               <SimpleGrid columns={{ base: 4, md: 6, lg: 8 }} spacing={2}>
                 {visibleUngrouped.slice(0, ungroupedVisibleCount).map((img, idx) => (
-                  <Box key={img.image_id} position="relative" role="group">
-                    <Box
-                      h="80px"
-                      w="100%"
-                      borderRadius="md"
-                      bg="gray.200"
-                      cursor="pointer"
-                      border={selectedImageIds.has(img.image_id) ? '2px solid' : '2px solid transparent'}
-                      borderColor={selectedImageIds.has(img.image_id) ? 'blue.400' : 'transparent'}
-                      backgroundImage={`url(${imageUrl(project.id, img)})`}
-                      backgroundSize="cover"
-                      backgroundPosition="center"
-                      onClick={(e) => handleImageClick(img.image_id, idx, e)}
-                    />
-                    {hasZones && (
-                      <Checkbox
-                        position="absolute"
-                        top={1}
-                        left={1}
-                        bg="whiteAlpha.800"
-                        borderRadius="sm"
-                        isChecked={selectedImageIds.has(img.image_id)}
-                        onChange={(e) => handleImageClick(img.image_id, idx, e as unknown as React.MouseEvent)}
-                      />
-                    )}
-                    {img.has_gps && (
-                      <Box
-                        position="absolute"
-                        bottom={1}
-                        left={1}
-                        bg="teal.500"
-                        color="white"
-                        borderRadius="sm"
-                        p="2px"
-                        title={`GPS: ${img.latitude?.toFixed(4)}, ${img.longitude?.toFixed(4)}`}
-                        pointerEvents="none"
-                      >
-                        <MapPin size={10} />
-                      </Box>
-                    )}
-                    <IconButton
-                      aria-label="Delete"
-                      icon={<X size={12} />}
-                      size="xs"
-                      position="absolute"
-                      top={1}
-                      right={1}
-                      colorScheme="red"
-                      opacity={0}
-                      _groupHover={{ opacity: 1 }}
-                      onClick={(e) => { e.stopPropagation(); deleteImageMutation.mutate(img.image_id); }}
-                    />
-                  </Box>
+                  <UngroupedImageTile
+                    key={img.image_id}
+                    projectId={project.id}
+                    imageId={img.image_id}
+                    index={idx}
+                    selected={selectedImageIds.has(img.image_id)}
+                    hasGps={img.has_gps}
+                    latitude={img.latitude}
+                    longitude={img.longitude}
+                    showCheckbox={hasZones}
+                    onClick={handleImageClick}
+                    onDelete={handleDeleteImage}
+                  />
                 ))}
               </SimpleGrid>
             </Box>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { useSearchParams, useParams, Link } from 'react-router-dom';
 import {
   Box,
@@ -34,6 +34,7 @@ import {
   Wrap,
   WrapItem,
 } from '@chakra-ui/react';
+import { Grid as VirtualGrid } from 'react-window';
 import { ScanSearch, Download, Eye, Archive, Lightbulb, Check as CheckIcon } from 'lucide-react';
 import JSZip from 'jszip';
 import { useSemanticConfig, useProject, useRecommendIndicators } from '../hooks/useApi';
@@ -44,6 +45,7 @@ import PageHeader from '../components/PageHeader';
 import EmptyState from '../components/EmptyState';
 import useAppToast from '../hooks/useAppToast';
 import useAppStore from '../store/useAppStore';
+import { thumbnailUrl } from '../components/ImageTile';
 
 const DIMENSIONS = [
   { id: 'PRF_AES', name: 'Aesthetics' },
@@ -53,6 +55,231 @@ const DIMENSIONS = [
   { id: 'PRF_USE', name: 'Spatial Use' },
   { id: 'PRF_SOC', name: 'Social' },
 ];
+
+/* ── Memoized sub-components ─────────────────────────────────────── */
+
+/** Single image tile in the "Project Images" selection grid. */
+const VisionImageTile = memo(function VisionImageTile({
+  projectId,
+  imageId,
+  selected,
+  onToggle,
+}: {
+  projectId: string;
+  imageId: string;
+  selected: boolean;
+  onToggle: (id: string) => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setVisible(true); io.disconnect(); } },
+      { rootMargin: '100px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  return (
+    <Box
+      ref={ref}
+      position="relative"
+      cursor="pointer"
+      onClick={() => onToggle(imageId)}
+      opacity={selected ? 1 : 0.5}
+      border={selected ? '2px solid' : '2px solid transparent'}
+      borderColor={selected ? 'blue.500' : 'transparent'}
+      borderRadius="md"
+    >
+      <Box
+        h="60px"
+        w="100%"
+        borderRadius="md"
+        bg="gray.200"
+        backgroundImage={visible ? `url(${thumbnailUrl(projectId, imageId)})` : undefined}
+        backgroundSize="cover"
+        backgroundPosition="center"
+      />
+    </Box>
+  );
+});
+
+/** Lazy-loaded mask image — only fetches when scrolled into view. */
+const LazyMaskImage = memo(function LazyMaskImage({
+  src,
+  label,
+}: {
+  src: string;
+  label: string;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setVisible(true); io.disconnect(); } },
+      { rootMargin: '200px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  return (
+    <Box ref={ref} position="relative" borderRadius="md" overflow="hidden" bg="gray.50">
+      {visible ? (
+        <Image
+          src={src}
+          alt={label}
+          w="100%"
+          h="80px"
+          objectFit="cover"
+          fallback={
+            <Box h="80px" display="flex" alignItems="center" justifyContent="center">
+              <Text fontSize="2xs" color="gray.400">{label}</Text>
+            </Box>
+          }
+        />
+      ) : (
+        <Box h="80px" display="flex" alignItems="center" justifyContent="center">
+          <Text fontSize="2xs" color="gray.400">{label}</Text>
+        </Box>
+      )}
+      <HStack
+        position="absolute"
+        bottom={0}
+        left={0}
+        right={0}
+        bg="blackAlpha.600"
+        px={1}
+        py={0.5}
+        justify="space-between"
+      >
+        <Text fontSize="2xs" color="white" noOfLines={1}>{label}</Text>
+        <HStack spacing={0}>
+          <Button
+            as="a"
+            href={src}
+            target="_blank"
+            size="xs"
+            variant="ghost"
+            color="white"
+            minW="auto"
+            p={0}
+            _hover={{ bg: 'whiteAlpha.300' }}
+          >
+            <Eye size={12} />
+          </Button>
+          <Button
+            as="a"
+            href={src}
+            download={`${label.replace(/\s+/g, '_')}.png`}
+            size="xs"
+            variant="ghost"
+            color="white"
+            minW="auto"
+            p={0}
+            _hover={{ bg: 'whiteAlpha.300' }}
+          >
+            <Download size={12} />
+          </Button>
+        </HStack>
+      </HStack>
+    </Box>
+  );
+});
+
+/** Single recommendation AccordionItem. */
+const RecommendationItem = memo(function RecommendationItem({
+  rec,
+  selected,
+  onToggle,
+}: {
+  rec: IndicatorRecommendation;
+  selected: boolean;
+  onToggle: (rec: IndicatorRecommendation) => void;
+}) {
+  return (
+    <AccordionItem borderColor={selected ? 'blue.300' : 'gray.200'}>
+      <AccordionButton py={2}>
+        <HStack flex="1" justify="space-between" pr={2}>
+          <HStack spacing={2}>
+            <Checkbox
+              isChecked={selected}
+              onChange={() => onToggle(rec)}
+              onClick={(e) => e.stopPropagation()}
+              size="sm"
+            />
+            <Badge colorScheme="blue" fontSize="xs">{rec.indicator_id}</Badge>
+            <Text fontSize="sm" fontWeight="bold" noOfLines={1}>{rec.indicator_name}</Text>
+          </HStack>
+          <HStack spacing={1}>
+            <Progress value={rec.relevance_score * 100} size="xs" w="40px" colorScheme="green" />
+            <Text fontSize="xs">{(rec.relevance_score * 100).toFixed(0)}%</Text>
+          </HStack>
+        </HStack>
+        <AccordionIcon />
+      </AccordionButton>
+      <AccordionPanel pb={3} px={3}>
+        <VStack align="stretch" spacing={2}>
+          <Text fontSize="xs">{rec.rationale}</Text>
+          <Wrap spacing={1}>
+            {rec.rank > 0 && <WrapItem><Badge colorScheme="purple" fontSize="2xs">#{rec.rank}</Badge></WrapItem>}
+            <WrapItem>
+              <Badge colorScheme={rec.relationship_direction === 'positive' || rec.relationship_direction === 'INCREASE' ? 'green' : 'orange'} fontSize="2xs">
+                {rec.relationship_direction}
+              </Badge>
+            </WrapItem>
+            {rec.strength_score && (
+              <WrapItem>
+                <Badge colorScheme={rec.strength_score === 'A' ? 'green' : rec.strength_score === 'B' ? 'blue' : 'gray'} fontSize="2xs">
+                  Strength {rec.strength_score}
+                </Badge>
+              </WrapItem>
+            )}
+            <WrapItem>
+              <Badge colorScheme={rec.confidence === 'high' ? 'green' : 'yellow'} fontSize="2xs">
+                {rec.confidence} conf.
+              </Badge>
+            </WrapItem>
+            {rec.transferability_summary && (
+              <WrapItem>
+                <Badge colorScheme="teal" variant="outline" fontSize="2xs">
+                  {rec.transferability_summary.high_count}H/{rec.transferability_summary.moderate_count}M/{rec.transferability_summary.low_count}L
+                </Badge>
+              </WrapItem>
+            )}
+          </Wrap>
+          {rec.evidence_citations && rec.evidence_citations.length > 0 ? (
+            <Box>
+              <Text fontSize="2xs" fontWeight="bold" color="gray.500" mb={1}>Evidence:</Text>
+              {rec.evidence_citations.slice(0, 3).map((cit) => (
+                <HStack key={cit.evidence_id} fontSize="2xs" color="gray.500" spacing={1}>
+                  <Badge size="sm" variant="outline" fontSize="2xs">{cit.evidence_id}</Badge>
+                  <Text noOfLines={1} flex={1}>{cit.citation}{cit.year ? ` (${cit.year})` : ''}</Text>
+                </HStack>
+              ))}
+              {rec.evidence_citations.length > 3 && (
+                <Text fontSize="2xs" color="gray.400">+{rec.evidence_citations.length - 3} more</Text>
+              )}
+            </Box>
+          ) : rec.evidence_ids?.length > 0 ? (
+            <Text fontSize="2xs" color="gray.400">
+              Evidence: {rec.evidence_ids.slice(0, 3).join(', ')}{rec.evidence_ids.length > 3 ? ` +${rec.evidence_ids.length - 3}` : ''}
+            </Text>
+          ) : null}
+        </VStack>
+      </AccordionPanel>
+    </AccordionItem>
+  );
+});
+
+/* ── Main page component ─────────────────────────────────────────── */
 
 function VisionAnalysis() {
   const { projectId: routeProjectId } = useParams<{ projectId: string }>();
@@ -86,8 +313,8 @@ function VisionAnalysis() {
   const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
   const [holeFilling, setHoleFilling] = useState(false);
 
-  // Project image selection
-  const [selectedProjectImages, setSelectedProjectImages] = useState<string[]>([]);
+  // Project image selection (Set for O(1) lookups)
+  const [selectedProjectImages, setSelectedProjectImages] = useState<Set<string>>(new Set());
 
   // Panorama mode
   const [isPanorama, setIsPanorama] = useState(false);
@@ -100,7 +327,7 @@ function VisionAnalysis() {
   const [batchProgress, setBatchProgress] = useState<{current: number; total: number} | null>(null);
 
   // Lazy render: show only N mask preview cards at a time (prevents 30K+ DOM nodes)
-  const MASK_PREVIEW_PAGE = 30;
+  const MASK_PREVIEW_PAGE = 10;
   const [maskVisibleCount, setMaskVisibleCount] = useState(MASK_PREVIEW_PAGE);
 
   // Vision results persisted in store (survive navigation)
@@ -147,8 +374,8 @@ function VisionAnalysis() {
 
   // Preview: how many of the selected images are already processed (eligible for resume/skip)
   const resumePreview = useMemo(() => {
-    if (!project || selectedProjectImages.length === 0) return { alreadyDone: 0, toProcess: 0 };
-    const selectedSet = new Set(selectedProjectImages);
+    if (!project || selectedProjectImages.size === 0) return { alreadyDone: 0, toProcess: 0 };
+    const selectedSet = selectedProjectImages;
     let alreadyDone = 0;
     for (const img of project.uploaded_images) {
       if (!selectedSet.has(img.image_id)) continue;
@@ -159,17 +386,25 @@ function VisionAnalysis() {
         : !!mp['semantic_map'];
       if (matched) alreadyDone++;
     }
-    return { alreadyDone, toProcess: selectedProjectImages.length - alreadyDone };
+    return { alreadyDone, toProcess: selectedProjectImages.size - alreadyDone };
   }, [project, selectedProjectImages, isPanorama]);
 
-  const isIndicatorSelected = (id: string) => selectedIndicators.some(i => i.indicator_id === id);
-  const toggleIndicator = (rec: IndicatorRecommendation) => {
-    if (isIndicatorSelected(rec.indicator_id)) {
+  const maskFileCount = useMemo(
+    () => maskResults.reduce((s, r) => s + Object.keys(r.maskPaths).length, 0),
+    [maskResults],
+  );
+
+  const selectedIndicatorIds = useMemo(
+    () => new Set(selectedIndicators.map(i => i.indicator_id)),
+    [selectedIndicators],
+  );
+  const toggleIndicator = useCallback((rec: IndicatorRecommendation) => {
+    if (selectedIndicatorIds.has(rec.indicator_id)) {
       removeSelectedIndicator(rec.indicator_id);
     } else {
       addSelectedIndicator(rec);
     }
-  };
+  }, [selectedIndicatorIds, removeSelectedIndicator, addSelectedIndicator]);
 
   // Default: select all semantic classes once when config loads
   const classesInitialized = useRef(false);
@@ -184,7 +419,7 @@ function VisionAnalysis() {
   const imagesInitialized = useRef(false);
   useEffect(() => {
     if (!imagesInitialized.current && project?.uploaded_images && project.uploaded_images.length > 0) {
-      setSelectedProjectImages(project.uploaded_images.map(img => img.image_id));
+      setSelectedProjectImages(new Set(project.uploaded_images.map(img => img.image_id)));
       imagesInitialized.current = true;
 
       // Restore mask results from project data if Zustand store is empty
@@ -212,23 +447,24 @@ function VisionAnalysis() {
     setSelectedClasses([]);
   };
 
-  const handleSelectAllImages = () => {
+  const handleSelectAllImages = useCallback(() => {
     if (project?.uploaded_images) {
-      setSelectedProjectImages(project.uploaded_images.map(img => img.image_id));
+      setSelectedProjectImages(new Set(project.uploaded_images.map(img => img.image_id)));
     }
-  };
+  }, [project?.uploaded_images]);
 
-  const handleSelectNoImages = () => {
-    setSelectedProjectImages([]);
-  };
+  const handleSelectNoImages = useCallback(() => {
+    setSelectedProjectImages(new Set());
+  }, []);
 
-  const toggleImageSelection = (imageId: string) => {
-    setSelectedProjectImages(prev =>
-      prev.includes(imageId)
-        ? prev.filter(id => id !== imageId)
-        : [...prev, imageId]
-    );
-  };
+  const toggleImageSelection = useCallback((imageId: string) => {
+    setSelectedProjectImages(prev => {
+      const next = new Set(prev);
+      if (next.has(imageId)) next.delete(imageId);
+      else next.add(imageId);
+      return next;
+    });
+  }, []);
 
   const handleAnalyze = async () => {
     if (selectedClasses.length === 0) {
@@ -253,8 +489,8 @@ function VisionAnalysis() {
     setMaskVisibleCount(MASK_PREVIEW_PAGE);
 
     try {
-      if (selectedProjectImages.length > 0 && projectId) {
-        const FLUSH_SIZE = 20;
+      if (selectedProjectImages.size > 0 && projectId) {
+        const FLUSH_SIZE = 50;
         let processed = 0;
         let skipped = 0;
         let successCount = 0;
@@ -296,7 +532,7 @@ function VisionAnalysis() {
             successCount++;
             skipped++;
             processed++;
-            setBatchProgress({ current: processed, total: selectedProjectImages.length });
+            setBatchProgress({ current: processed, total: selectedProjectImages.size });
             if (maskBuffer.length >= FLUSH_SIZE) flushMaskBuffer();
             continue;
           }
@@ -340,7 +576,7 @@ function VisionAnalysis() {
           }
 
           processed++;
-          setBatchProgress({ current: processed, total: selectedProjectImages.length });
+          setBatchProgress({ current: processed, total: selectedProjectImages.size });
           if (maskBuffer.length >= FLUSH_SIZE) flushMaskBuffer();
         }
 
@@ -350,7 +586,7 @@ function VisionAnalysis() {
         if (successCount > 0) {
           setStatistics({
             images_processed: successCount,
-            total_images: selectedProjectImages.length,
+            total_images: selectedProjectImages.size,
           });
         }
 
@@ -454,41 +690,49 @@ function VisionAnalysis() {
                 <VStack align="stretch" spacing={3}>
                   <HStack justify="space-between">
                     <Text fontSize="sm" color="gray.600">
-                      {selectedProjectImages.length} of {project.uploaded_images.length} selected
+                      {selectedProjectImages.size} of {project.uploaded_images.length} selected
                     </Text>
                     <HStack>
                       <Button size="xs" onClick={handleSelectAllImages}>All</Button>
                       <Button size="xs" onClick={handleSelectNoImages}>None</Button>
                     </HStack>
                   </HStack>
-                  <SimpleGrid columns={4} spacing={2} maxH="200px" overflowY="auto">
-                    {project.uploaded_images.map((img: UploadedImage) => (
-                      <Box
-                        key={img.image_id}
-                        position="relative"
-                        cursor="pointer"
-                        onClick={() => toggleImageSelection(img.image_id)}
-                        opacity={selectedProjectImages.includes(img.image_id) ? 1 : 0.5}
-                        border={selectedProjectImages.includes(img.image_id) ? '2px solid' : 'none'}
-                        borderColor="blue.500"
-                        borderRadius="md"
+                  {(() => {
+                    const COLS = 4;
+                    const ROW_H = 68;     // tile 60px + 8px gap
+                    const COL_W = 90;     // responsive fallback; actual width set by container
+                    const images = project.uploaded_images;
+                    const rowCount = Math.ceil(images.length / COLS);
+                    const gridHeight = Math.min(rowCount * ROW_H, 200);
+                    return (
+                      <FixedSizeGrid
+                        columnCount={COLS}
+                        columnWidth={COL_W}
+                        rowCount={rowCount}
+                        rowHeight={ROW_H}
+                        height={gridHeight}
+                        width={COLS * COL_W + 16}
+                        overscanRowCount={3}
+                        style={{ overflowX: 'hidden' }}
                       >
-                        <Image
-                          src={`/api/uploads/${projectId}/${img.image_id}_${img.filename}`}
-                          alt={img.filename}
-                          h="60px"
-                          w="100%"
-                          objectFit="cover"
-                          borderRadius="md"
-                          fallback={
-                            <Box h="60px" bg="gray.200" borderRadius="md" display="flex" alignItems="center" justifyContent="center">
-                              <Text fontSize="xs">{img.filename}</Text>
-                            </Box>
-                          }
-                        />
-                      </Box>
-                    ))}
-                  </SimpleGrid>
+                        {({ columnIndex, rowIndex, style }) => {
+                          const idx = rowIndex * COLS + columnIndex;
+                          if (idx >= images.length) return null;
+                          const img = images[idx];
+                          return (
+                            <div style={{ ...style, padding: 2 }}>
+                              <VisionImageTile
+                                projectId={projectId!}
+                                imageId={img.image_id}
+                                selected={selectedProjectImages.has(img.image_id)}
+                                onToggle={toggleImageSelection}
+                              />
+                            </div>
+                          );
+                        }}
+                      </FixedSizeGrid>
+                    );
+                  })()}
                 </VStack>
               )}
             </CardBody>
@@ -576,7 +820,7 @@ function VisionAnalysis() {
             <Alert status="info" size="sm" borderRadius="md" py={2}>
               <AlertIcon />
               <Text fontSize="sm">
-                <strong>{resumePreview.alreadyDone}</strong> of {selectedProjectImages.length} already processed —
+                <strong>{resumePreview.alreadyDone}</strong> of {selectedProjectImages.size} already processed —
                 {' '}only <strong>{resumePreview.toProcess}</strong> new image(s) will be analyzed.
                 {' '}Enable "Force re-analyze" to process all.
               </Text>
@@ -589,10 +833,10 @@ function VisionAnalysis() {
             size="lg"
             onClick={handleAnalyze}
             isLoading={analyzing}
-            isDisabled={selectedClasses.length === 0 || selectedProjectImages.length === 0 || visionHealthy === false}
+            isDisabled={selectedClasses.length === 0 || selectedProjectImages.size === 0 || visionHealthy === false}
           >
             {(() => {
-              const total = selectedProjectImages.length;
+              const total = selectedProjectImages.size;
               if (total === 0) return 'Analyze Image';
               if (!forceRerun && resumePreview.toProcess < total) {
                 return `Analyze ${resumePreview.toProcess} New Image${resumePreview.toProcess !== 1 ? 's' : ''} (${resumePreview.alreadyDone} cached)`;
@@ -677,7 +921,7 @@ function VisionAnalysis() {
                 <HStack justify="space-between">
                   <Heading size="md">Output Masks</Heading>
                   <HStack>
-                    <Badge colorScheme="green">{maskResults.reduce((s, r) => s + Object.keys(r.maskPaths).length, 0)} files</Badge>
+                    <Badge colorScheme="green">{maskFileCount} files</Badge>
                     <Button
                       size="xs"
                       leftIcon={<Archive size={12} />}
@@ -747,66 +991,13 @@ function VisionAnalysis() {
                           </Text>
                         )}
                         <SimpleGrid columns={3} spacing={2}>
-                          {Object.entries(maskPaths).map(([maskKey]) => {
-                            const maskUrl = `/api/masks/${projectId}/${imageId}/${maskKey}.png`;
-                            const label = maskKey.replace(/_/g, ' ');
-                            return (
-                              <Box key={maskKey} position="relative" borderRadius="md" overflow="hidden" bg="gray.50">
-                                <Image
-                                  src={maskUrl}
-                                  alt={label}
-                                  w="100%"
-                                  h="80px"
-                                  objectFit="cover"
-                                  fallback={
-                                    <Box h="80px" display="flex" alignItems="center" justifyContent="center">
-                                      <Text fontSize="2xs" color="gray.400">{label}</Text>
-                                    </Box>
-                                  }
-                                />
-                                <HStack
-                                  position="absolute"
-                                  bottom={0}
-                                  left={0}
-                                  right={0}
-                                  bg="blackAlpha.600"
-                                  px={1}
-                                  py={0.5}
-                                  justify="space-between"
-                                >
-                                  <Text fontSize="2xs" color="white" noOfLines={1}>{label}</Text>
-                                  <HStack spacing={0}>
-                                    <Button
-                                      as="a"
-                                      href={maskUrl}
-                                      target="_blank"
-                                      size="xs"
-                                      variant="ghost"
-                                      color="white"
-                                      minW="auto"
-                                      p={0}
-                                      _hover={{ bg: 'whiteAlpha.300' }}
-                                    >
-                                      <Eye size={12} />
-                                    </Button>
-                                    <Button
-                                      as="a"
-                                      href={maskUrl}
-                                      download={`${maskKey}.png`}
-                                      size="xs"
-                                      variant="ghost"
-                                      color="white"
-                                      minW="auto"
-                                      p={0}
-                                      _hover={{ bg: 'whiteAlpha.300' }}
-                                    >
-                                      <Download size={12} />
-                                    </Button>
-                                  </HStack>
-                                </HStack>
-                              </Box>
-                            );
-                          })}
+                          {Object.entries(maskPaths).map(([maskKey]) => (
+                            <LazyMaskImage
+                              key={maskKey}
+                              src={`/api/masks/${projectId}/${imageId}/${maskKey}.png`}
+                              label={maskKey.replace(/_/g, ' ')}
+                            />
+                          ))}
                         </SimpleGrid>
                       </Box>
                     );
@@ -888,83 +1079,14 @@ function VisionAnalysis() {
               {recommendations.length > 0 ? (
                 <VStack align="stretch" spacing={3}>
                   <Accordion allowMultiple>
-                    {recommendations.map((rec) => {
-                      const selected = isIndicatorSelected(rec.indicator_id);
-                      return (
-                        <AccordionItem key={rec.indicator_id} borderColor={selected ? 'blue.300' : 'gray.200'}>
-                          <AccordionButton py={2}>
-                            <HStack flex="1" justify="space-between" pr={2}>
-                              <HStack spacing={2}>
-                                <Checkbox
-                                  isChecked={selected}
-                                  onChange={() => toggleIndicator(rec)}
-                                  onClick={(e) => e.stopPropagation()}
-                                  size="sm"
-                                />
-                                <Badge colorScheme="blue" fontSize="xs">{rec.indicator_id}</Badge>
-                                <Text fontSize="sm" fontWeight="bold" noOfLines={1}>{rec.indicator_name}</Text>
-                              </HStack>
-                              <HStack spacing={1}>
-                                <Progress value={rec.relevance_score * 100} size="xs" w="40px" colorScheme="green" />
-                                <Text fontSize="xs">{(rec.relevance_score * 100).toFixed(0)}%</Text>
-                              </HStack>
-                            </HStack>
-                            <AccordionIcon />
-                          </AccordionButton>
-                          <AccordionPanel pb={3} px={3}>
-                            <VStack align="stretch" spacing={2}>
-                              <Text fontSize="xs">{rec.rationale}</Text>
-                              <Wrap spacing={1}>
-                                {rec.rank > 0 && <WrapItem><Badge colorScheme="purple" fontSize="2xs">#{rec.rank}</Badge></WrapItem>}
-                                <WrapItem>
-                                  <Badge colorScheme={rec.relationship_direction === 'positive' || rec.relationship_direction === 'INCREASE' ? 'green' : 'orange'} fontSize="2xs">
-                                    {rec.relationship_direction}
-                                  </Badge>
-                                </WrapItem>
-                                {rec.strength_score && (
-                                  <WrapItem>
-                                    <Badge colorScheme={rec.strength_score === 'A' ? 'green' : rec.strength_score === 'B' ? 'blue' : 'gray'} fontSize="2xs">
-                                      Strength {rec.strength_score}
-                                    </Badge>
-                                  </WrapItem>
-                                )}
-                                <WrapItem>
-                                  <Badge colorScheme={rec.confidence === 'high' ? 'green' : 'yellow'} fontSize="2xs">
-                                    {rec.confidence} conf.
-                                  </Badge>
-                                </WrapItem>
-                                {rec.transferability_summary && (
-                                  <WrapItem>
-                                    <Badge colorScheme="teal" variant="outline" fontSize="2xs">
-                                      {rec.transferability_summary.high_count}H/{rec.transferability_summary.moderate_count}M/{rec.transferability_summary.low_count}L
-                                    </Badge>
-                                  </WrapItem>
-                                )}
-                              </Wrap>
-                              {/* Evidence */}
-                              {rec.evidence_citations && rec.evidence_citations.length > 0 ? (
-                                <Box>
-                                  <Text fontSize="2xs" fontWeight="bold" color="gray.500" mb={1}>Evidence:</Text>
-                                  {rec.evidence_citations.slice(0, 3).map((cit) => (
-                                    <HStack key={cit.evidence_id} fontSize="2xs" color="gray.500" spacing={1}>
-                                      <Badge size="sm" variant="outline" fontSize="2xs">{cit.evidence_id}</Badge>
-                                      <Text noOfLines={1} flex={1}>{cit.citation}{cit.year ? ` (${cit.year})` : ''}</Text>
-                                    </HStack>
-                                  ))}
-                                  {rec.evidence_citations.length > 3 && (
-                                    <Text fontSize="2xs" color="gray.400">+{rec.evidence_citations.length - 3} more</Text>
-                                  )}
-                                </Box>
-                              ) : rec.evidence_ids?.length > 0 ? (
-                                <Text fontSize="2xs" color="gray.400">
-                                  Evidence: {rec.evidence_ids.slice(0, 3).join(', ')}{rec.evidence_ids.length > 3 ? ` +${rec.evidence_ids.length - 3}` : ''}
-                                </Text>
-                              ) : null}
-                            </VStack>
-                          </AccordionPanel>
-                        </AccordionItem>
-                      );
-                    })}
+                    {recommendations.map((rec) => (
+                      <RecommendationItem
+                        key={rec.indicator_id}
+                        rec={rec}
+                        selected={selectedIndicatorIds.has(rec.indicator_id)}
+                        onToggle={toggleIndicator}
+                      />
+                    ))}
                   </Accordion>
 
                   {/* Relationships */}

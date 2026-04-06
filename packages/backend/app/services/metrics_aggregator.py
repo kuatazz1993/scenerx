@@ -42,8 +42,13 @@ class MetricsAggregator:
         # v7.0: also emit long-format image-level records for violin / scatter
         image_records: list[ImageRecord] = []
 
+        skipped = 0
         for img in images:
             if not img.zone_id or img.zone_id not in zone_lookup:
+                continue
+            # Skip images with empty metrics_results (no Vision API analysis)
+            if not img.metrics_results:
+                skipped += 1
                 continue
             zone = zone_lookup[img.zone_id]
             for ind_id in indicator_ids:
@@ -76,6 +81,9 @@ class MetricsAggregator:
                             lat=img.latitude,
                             lng=img.longitude,
                         ))
+
+        if skipped:
+            logger.info("MetricsAggregator: skipped %d images with empty metrics_results", skipped)
 
         # Build zone statistics
         zone_statistics: list[IndicatorLayerValue] = []

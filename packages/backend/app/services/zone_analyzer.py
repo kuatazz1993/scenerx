@@ -67,6 +67,13 @@ class ZoneAnalyzer:
                 "are undefined (need ≥ 2 zones). All z-score based charts will "
                 "show 0. Add more zones or switch to image-level analysis."
             )
+        elif len(zone_names) == 2:
+            warnings.append(
+                "Only 2 zones — z-scores are always ±1 (mathematical property of "
+                "standardising 2 values). Correlations between indicators are "
+                "undefined with only 2 data points. Add a 3rd zone for "
+                "meaningful cross-zone statistics."
+            )
 
         # 2) Z-scores per layer
         zscore_by_layer: dict[str, pd.DataFrame] = {}

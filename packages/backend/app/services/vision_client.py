@@ -4,12 +4,14 @@ Async HTTP client for communicating with the Vision API backend
 """
 
 import json
+import io
 import time
 import logging
 from typing import Optional
 from pathlib import Path
 
 import httpx
+from PIL import Image as PILImage
 
 from app.models.vision import VisionAnalysisRequest, VisionAnalysisResponse
 
@@ -206,9 +208,37 @@ class VisionModelClient:
 
             start_time = time.time()
 
+            # 大图自动降采样: 最长边超过 MAX_DIMENSION 时缩小再发送
+            MAX_DIMENSION = 4096
+            upload_bytes: Optional[bytes] = None
+            upload_name = path.name
+
+            try:
+                with PILImage.open(image_path) as pil_img:
+                    w_orig, h_orig = pil_img.size
+                    if max(w_orig, h_orig) > MAX_DIMENSION:
+                        scale = MAX_DIMENSION / max(w_orig, h_orig)
+                        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+                        pil_resized = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+                        buf = io.BytesIO()
+                        fmt = "JPEG" if path.suffix.lower() in (".jpg", ".jpeg") else "PNG"
+                        pil_resized.save(buf, format=fmt, quality=92)
+                        upload_bytes = buf.getvalue()
+                        logger.info(
+                            "Auto-resized %s: %dx%d (%.1fMP) → %dx%d (%.1fMP) before Vision API",
+                            path.name, w_orig, h_orig, w_orig * h_orig / 1e6,
+                            new_w, new_h, new_w * new_h / 1e6,
+                        )
+            except Exception as e:
+                logger.warning("Failed to check/resize image %s: %s — sending original", path.name, e)
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                with open(image_path, 'rb') as f:
-                    files = {'file': (path.name, f, 'image/jpeg')}
+                if upload_bytes is not None:
+                    files = {'file': (upload_name, upload_bytes, 'image/jpeg')}
+                else:
+                    _fh = open(image_path, 'rb')
+                    files = {'file': (path.name, _fh, 'image/jpeg')}
+                try:
                     data = {'request_data': json.dumps(request_data)}
 
                     response = await client.post(
@@ -216,6 +246,9 @@ class VisionModelClient:
                         files=files,
                         data=data,
                     )
+                finally:
+                    if upload_bytes is None:
+                        _fh.close()
 
             elapsed_time = time.time() - start_time
             logger.info("Vision API responded: status=%d elapsed=%.1fs image=%s", response.status_code, elapsed_time, path.name)
@@ -231,6 +264,14 @@ class VisionModelClient:
                             if isinstance(hex_data, str):
                                 processed_images[key] = bytes.fromhex(hex_data)
 
+                    # 检查 Vision API 返回的语义分割状态
+                    sem_status = result.get('semantic_status', 'unknown')
+                    if sem_status == 'failed':
+                        logger.warning(
+                            "Vision API semantic segmentation FAILED for %s — "
+                            "metrics will be 0 for this image", path.name,
+                        )
+
                     return VisionAnalysisResponse(
                         status="success",
                         image_path=image_path,
@@ -242,6 +283,7 @@ class VisionModelClient:
                             'total_classes': result.get('total_classes', len(request.semantic_classes)),
                             'class_statistics': result.get('class_statistics', {}),
                             'fmb_statistics': result.get('fmb_statistics', {}),
+                            'semantic_status': sem_status,
                         },
                         images=processed_images,
                         instances=result.get('instances', []),

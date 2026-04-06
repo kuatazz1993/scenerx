@@ -36,10 +36,12 @@ import {
   AccordionButton,
   AccordionPanel,
   AccordionIcon,
+  Tooltip,
 } from '@chakra-ui/react';
-import { Download, FileText, FileImage, CheckCircle, AlertTriangle, Sparkles, RefreshCw } from 'lucide-react';
+import { Download, FileText, FileImage, FileSpreadsheet, CheckCircle, AlertTriangle, Sparkles, RefreshCw } from 'lucide-react';
 import useAppStore from '../store/useAppStore';
 import { generateReport } from '../utils/generateReport';
+import { exportAnalysisExcel } from '../utils/exportExcel';
 import { useGenerateReport, useRunDesignStrategies, useRunClusteringByProject } from '../hooks/useApi';
 import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
@@ -48,7 +50,7 @@ import EmptyState from '../components/EmptyState';
 import { CHART_REGISTRY } from '../components/analysisCharts/registry';
 import { ChartHost } from '../components/analysisCharts/ChartHost';
 import { ChartPicker } from '../components/analysisCharts/ChartPicker';
-import { buildChartContext, LAYERS, LAYER_LABELS } from '../components/analysisCharts/ChartContext';
+import { buildChartContext } from '../components/analysisCharts/ChartContext';
 import type { ReportRequest, ZoneDiagnostic, ZoneDesignOutput, ClusteringResponse } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -178,8 +180,9 @@ function Reports() {
   const designStrategiesMutation = useRunDesignStrategies();
   const [clusteringResult, setClusteringResult] = useState<ClusteringResponse | null>(null);
 
-  // Layer tabs
-  const [selectedLayer, setSelectedLayer] = useState(0);
+  // Layer — fixed to full (per-layer breakdowns shown inline in Deep Dive,
+  // Radar by Layer, Global Stats, and Distribution charts)
+  const selectedLayer = 'full';
 
   // Check if Stage 3 failed in pipeline
   const stage3Failed = pipelineResult?.steps?.some(s => s.step === 'design_strategies' && s.status === 'failed') ?? false;
@@ -291,7 +294,7 @@ function Reports() {
         pipelineResult: pipelineResult ?? null,
         clusteringResult,
         currentProject: currentProject ?? null,
-        selectedLayer: LAYERS[selectedLayer],
+        selectedLayer,
       }),
     [zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer],
   );
@@ -334,11 +337,24 @@ function Reports() {
   };
 
   const handleExportJson = () => {
+    // Per-image metrics: flatten uploaded_images to id + zone + GPS + metrics
+    const imageMetrics = currentProject?.uploaded_images?.map(img => ({
+      image_id: img.image_id,
+      filename: img.filename,
+      zone_id: img.zone_id,
+      has_gps: img.has_gps,
+      latitude: img.latitude,
+      longitude: img.longitude,
+      metrics: img.metrics_results,
+    })) ?? [];
+
     const data = {
       project_name: projectName,
+      project_location: currentProject?.project_location ?? null,
       exported_at: new Date().toISOString(),
       recommendations,
       selected_indicators: selectedIndicators,
+      image_metrics: imageMetrics,
       zone_analysis: zoneAnalysisResult,
       design_strategies: designStrategyResult,
       pipeline_result: pipelineResult,
@@ -352,6 +368,124 @@ function Reports() {
     URL.revokeObjectURL(url);
     toast({ title: 'JSON exported', status: 'success' });
   };
+
+  const handleExportExcel = async () => {
+    try {
+      await exportAnalysisExcel({
+        projectName,
+        images: currentProject?.uploaded_images ?? [],
+        zoneStats: zoneAnalysisResult?.zone_statistics ?? [],
+        diagnostics: zoneAnalysisResult?.zone_diagnostics ?? [],
+        correlationByLayer: zoneAnalysisResult?.correlation_by_layer ?? null,
+        pvalueByLayer: zoneAnalysisResult?.pvalue_by_layer ?? null,
+        globalStats: zoneAnalysisResult?.global_indicator_stats ?? [],
+      });
+      toast({ title: 'Excel exported', status: 'success' });
+    } catch {
+      toast({ title: 'Excel export failed', status: 'error' });
+    }
+  };
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (!zoneAnalysisResult) return;
+    toast({ title: 'Generating PDF...', status: 'info', duration: 2000 });
+    try {
+      const { jsPDF } = await import('jspdf');
+      const md = generateReport({
+        projectName,
+        pipelineResult,
+        zoneResult: zoneAnalysisResult,
+        designResult: designStrategyResult,
+        radarProfiles: zoneAnalysisResult.radar_profiles ?? null,
+        correlationByLayer: zoneAnalysisResult.correlation_by_layer ?? null,
+      });
+
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const margin = 15;
+      const pageW = 210 - margin * 2;
+      const pageH = 297 - margin * 2;
+      let y = margin;
+
+      const addText = (text: string, size: number, style: 'normal' | 'bold' = 'normal') => {
+        pdf.setFontSize(size);
+        pdf.setFont('helvetica', style);
+        const lines = pdf.splitTextToSize(text, pageW);
+        for (const line of lines) {
+          if (y + size * 0.4 > margin + pageH) {
+            pdf.addPage();
+            y = margin;
+          }
+          pdf.text(line, margin, y);
+          y += size * 0.45;
+        }
+      };
+
+      // Title page
+      pdf.setFontSize(20);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text(projectName, margin, 40);
+      pdf.setFontSize(12);
+      pdf.setFont('helvetica', 'normal');
+      pdf.text('SceneRx Analysis Report', margin, 50);
+      pdf.text(new Date().toLocaleDateString(), margin, 58);
+      if (pipelineResult) {
+        pdf.setFontSize(10);
+        pdf.text(`Images: ${pipelineResult.zone_assigned_images}/${pipelineResult.total_images}`, margin, 70);
+        pdf.text(`Calculations: ${pipelineResult.calculations_succeeded} succeeded`, margin, 76);
+        pdf.text(`Zone Stats: ${pipelineResult.zone_statistics_count}`, margin, 82);
+        pdf.text(`Zones: ${sortedDiagnostics.length}`, margin, 88);
+      }
+      pdf.addPage();
+      y = margin;
+
+      // Render markdown content
+      for (const line of md.split('\n')) {
+        if (line.startsWith('### ')) {
+          y += 2;
+          addText(line.slice(4), 12, 'bold');
+          y += 1;
+        } else if (line.startsWith('## ')) {
+          y += 3;
+          addText(line.slice(3), 14, 'bold');
+          y += 1;
+        } else if (line.startsWith('# ')) {
+          y += 4;
+          addText(line.slice(2), 16, 'bold');
+          y += 2;
+        } else if (line.startsWith('- ') || line.startsWith('* ')) {
+          addText(`  \u2022 ${line.slice(2)}`, 10);
+        } else if (line.startsWith('|') && !line.match(/^\|[\s-:|]+\|$/)) {
+          // Table rows — render as tab-separated text
+          const cells = line.split('|').filter(c => c.trim()).map(c => c.trim());
+          addText(cells.join('    '), 9);
+        } else if (line.trim() === '') {
+          y += 2;
+        } else {
+          const clean = line
+            .replace(/\*\*(.+?)\*\*/g, '$1')
+            .replace(/\*(.+?)\*/g, '$1')
+            .replace(/`(.+?)`/g, '$1');
+          addText(clean, 10);
+        }
+      }
+
+      // Footer with page numbers
+      const totalPages = pdf.getNumberOfPages();
+      for (let i = 1; i <= totalPages; i++) {
+        pdf.setPage(i);
+        pdf.setFontSize(8);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(150);
+        pdf.text(`${projectName} — Page ${i}/${totalPages}`, 105, 290, { align: 'center' });
+        pdf.setTextColor(0);
+      }
+
+      pdf.save(`${projectName.replace(/\s+/g, '_')}_report.pdf`);
+      toast({ title: 'PDF downloaded', status: 'success' });
+    } catch {
+      toast({ title: 'PDF generation failed', status: 'error' });
+    }
+  }, [zoneAnalysisResult, designStrategyResult, pipelineResult, projectName, sortedDiagnostics, toast]);
 
   const handleDownloadAiReportPdf = useCallback(async () => {
     if (!aiReport) return;
@@ -420,12 +554,26 @@ function Reports() {
               onReset={resetCharts}
             />
           )}
-          <Button size="sm" leftIcon={<Download size={14} />} onClick={handleDownloadMarkdown} isDisabled={!hasAnalysis} colorScheme="blue">
-            MD
-          </Button>
-          <Button size="sm" leftIcon={<FileText size={14} />} onClick={handleExportJson} isDisabled={isEmpty}>
-            JSON
-          </Button>
+          <Tooltip label="Readable report with zone diagnostics, correlations, and design strategies" placement="bottom" hasArrow>
+            <Button size="sm" leftIcon={<Download size={14} />} onClick={handleDownloadMarkdown} isDisabled={!hasAnalysis} colorScheme="blue">
+              Report (.md)
+            </Button>
+          </Tooltip>
+          <Tooltip label="Same report content as Markdown, formatted as PDF" placement="bottom" hasArrow>
+            <Button size="sm" leftIcon={<FileImage size={14} />} onClick={handleDownloadPdf} isDisabled={!hasAnalysis} colorScheme="green">
+              Report (.pdf)
+            </Button>
+          </Tooltip>
+          <Tooltip label="Multi-sheet spreadsheet: image metrics, zone statistics, correlations, and global stats" placement="bottom" hasArrow>
+            <Button size="sm" leftIcon={<FileSpreadsheet size={14} />} onClick={handleExportExcel} isDisabled={isEmpty} colorScheme="teal">
+              Data (.xlsx)
+            </Button>
+          </Tooltip>
+          <Tooltip label="Complete raw data dump: all pipeline results, zone analysis, and per-image metrics" placement="bottom" hasArrow>
+            <Button size="sm" leftIcon={<FileText size={14} />} onClick={handleExportJson} isDisabled={isEmpty} variant="outline">
+              Raw (.json)
+            </Button>
+          </Tooltip>
         </HStack>
       </PageHeader>
 
@@ -554,15 +702,6 @@ function Reports() {
                     </Box>
                   </Alert>
                 ) : null}
-
-                {/* Layer selector (for layer-aware charts) */}
-                {hasAnalysis && (
-                  <Tabs index={selectedLayer} onChange={setSelectedLayer} colorScheme="green" variant="soft-rounded" mb={4}>
-                    <TabList>
-                      {LAYERS.map(l => <Tab key={l}>{LAYER_LABELS[l]}</Tab>)}
-                    </TabList>
-                  </Tabs>
-                )}
 
                 {sortedDiagnostics.length > 0 && (
                   <VStack spacing={6} align="stretch">

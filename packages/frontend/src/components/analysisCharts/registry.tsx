@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import {
   Box,
-  SimpleGrid,
   Text,
   VStack,
   Table,
@@ -17,10 +16,7 @@ import {
   RadarProfileByLayer,
   ZonePriorityChart,
   CorrelationHeatmap,
-  IndicatorComparisonChart,
   PriorityHeatmap,
-  DescriptiveStatsChart,
-  ZScoreHeatmap,
   ArchetypeRadarChart,
   ClusterSizeChart,
   SpatialScatterByLayer,
@@ -35,7 +31,6 @@ import {
   DataQualityTable,
 } from '../AnalysisCharts';
 import type { ChartContext } from './ChartContext';
-import { LAYERS, LAYER_LABELS } from './ChartContext';
 
 export type ChartTab = 'diagnostics' | 'statistics' | 'analysis';
 export type ChartSection = 'zone' | 'clustering' | 'tables' | 'distributions';
@@ -58,23 +53,6 @@ export interface ChartDescriptor {
   render: (ctx: ChartContext) => ReactNode;
   /** Whether the chart reacts to the layer selector (re-rendered on layer change) */
   layerAware?: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers (kept local to the registry for self-containment)
-// ---------------------------------------------------------------------------
-
-function formatNum(v: number | null | undefined, decimals = 2): string {
-  if (v === null || v === undefined) return '-';
-  return v.toFixed(decimals);
-}
-
-function significanceStars(p: number | undefined): string {
-  if (p === undefined || p === null) return '';
-  if (p < 0.001) return '***';
-  if (p < 0.01) return '**';
-  if (p < 0.05) return '*';
-  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -110,31 +88,11 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     render: (ctx) => <PriorityHeatmap diagnostics={ctx.sortedDiagnostics} layer="full" />,
   },
   {
-    id: 'zscore-heatmaps-by-layer',
-    title: 'Z-Score Heatmaps by Layer',
-    tab: 'analysis',
-    section: 'zone',
-    description: 'Four heatmaps (Full / FG / MG / BG) side by side',
-    isAvailable: (ctx) => !!ctx.zoneAnalysisResult,
-    render: (ctx) => (
-      <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-        {LAYERS.map((layer) => (
-          <Box key={layer}>
-            <Text fontSize="sm" fontWeight="bold" mb={2} color="gray.600">
-              {LAYER_LABELS[layer]} Layer
-            </Text>
-            <ZScoreHeatmap stats={ctx.zoneAnalysisResult!.zone_statistics} layer={layer} />
-          </Box>
-        ))}
-      </SimpleGrid>
-    ),
-  },
-  {
     id: 'spatial-distribution-by-layer',
-    title: 'Spatial Distribution by Layer (Fig 7)',
+    title: 'Spatial Distribution — All Layers (Fig 7)',
     tab: 'analysis',
     section: 'zone',
-    description: '2×2 spatial scatter per indicator (needs GPS)',
+    description: 'Combined spatial scatter per indicator, color-coded by layer (needs GPS)',
     isAvailable: (ctx) => ctx.gpsImages.length > 0 && ctx.gpsIndicatorIds.length > 0,
     render: (ctx) => (
       <VStack align="stretch" spacing={6}>
@@ -149,7 +107,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     title: 'Cross-Indicator Spatial Maps (Fig 8)',
     tab: 'analysis',
     section: 'zone',
-    description: 'Mean |z| + most-distinctive indicator per point (needs GPS)',
+    description: 'Mean |z| deviation + most-distinctive indicator per GPS point (full layer)',
     isAvailable: (ctx) => ctx.gpsImages.length > 0 && ctx.gpsIndicatorIds.length > 0,
     render: (ctx) => (
       <CrossIndicatorSpatialMaps gpsImages={ctx.gpsImages} indicatorIds={ctx.gpsIndicatorIds} />
