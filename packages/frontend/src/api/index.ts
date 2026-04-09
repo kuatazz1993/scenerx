@@ -293,7 +293,9 @@ export const api = {
                 if (parsed.type === 'result') gotResult = true;
                 if (parsed.type === 'error') gotError = true;
                 onEvent(parsed);
-              } catch { /* skip malformed */ }
+              } catch (e) {
+                console.error('[Pipeline SSE] Failed to parse event:', line.slice(6, 200), e);
+              }
             }
           }
         }

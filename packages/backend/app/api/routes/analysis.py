@@ -7,11 +7,13 @@ import asyncio
 import gc
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from PIL import Image as PILImage
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -47,6 +49,39 @@ from app.api.routes.projects import get_projects_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class _SafeJSONEncoder(json.JSONEncoder):
+    """JSON encoder that converts NaN/Infinity to null and numpy types to Python types."""
+
+    def default(self, o: Any) -> Any:
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            v = float(o)
+            if math.isnan(v) or math.isinf(v):
+                return None
+            return v
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        return super().default(o)
+
+    def encode(self, o: Any) -> str:
+        return super().encode(self._sanitize(o))
+
+    def _sanitize(self, obj: Any) -> Any:
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+        elif isinstance(obj, dict):
+            return {k: self._sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._sanitize(v) for v in obj]
+        return obj
+
+
+def _safe_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, cls=_SafeJSONEncoder)
 
 
 # ---------------------------------------------------------------------------
@@ -758,10 +793,10 @@ async def run_project_pipeline_stream(
     async def event_generator():
         try:
             async for event in _execute_project_pipeline(request, analyzer, engine, calculator, manager):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield f"data: {_safe_json(event)}\n\n"
         except Exception as e:
             logger.error("Project pipeline stream crashed: %s", e, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            yield f"data: {_safe_json({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(
         event_generator(),
