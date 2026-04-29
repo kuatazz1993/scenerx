@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState, useEffect } from 'react';
+import { useMemo, useCallback, useState, useEffect, useRef } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -54,7 +54,7 @@ import {
   SectionHeading,
   type ChartSection,
 } from '../components/analysisCharts/registry';
-import { ChartHost } from '../components/analysisCharts/ChartHost';
+import { ChartHost, type ChartHostHandle } from '../components/analysisCharts/ChartHost';
 import { ChartPicker } from '../components/analysisCharts/ChartPicker';
 import { buildChartContext } from '../components/analysisCharts/ChartContext';
 import { ModeAlert } from '../components/analysisCharts/ModeAlert';
@@ -62,6 +62,11 @@ import { DataQualitySummary } from '../components/analysisCharts/DataQualitySumm
 import { LayerSelector, LAYER_OPTIONS } from '../components/analysisCharts/LayerSelector';
 import { AnalysisConfidenceGauge } from '../components/analysisCharts/AnalysisConfidenceGauge';
 import { GlossaryDrawer } from '../components/GlossaryDrawer';
+import {
+  captureChartsForReport,
+  waitForPaint,
+  type CapturedChart,
+} from '../utils/captureCharts';
 import type { ReportRequest, ZoneDiagnostic, ZoneDesignOutput, ClusteringResponse } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -226,6 +231,16 @@ function Reports() {
   const clusteringMutation = useRunClusteringByProject();
   const designStrategiesMutation = useRunDesignStrategies();
   const [clusteringResult, setClusteringResult] = useState<ClusteringResponse | null>(null);
+
+  // Chart export plumbing (6.B(1)). chartRefs is populated by ref callbacks
+  // on every ChartHost; exporting flips forceMount so lazy-loaded cards and
+  // the clustering accordion render before captureChartsForReport runs.
+  const chartRefs = useRef<Map<string, ChartHostHandle | null>>(new Map());
+  const [exporting, setExporting] = useState(false);
+  const setChartRef = useCallback((id: string) => (handle: ChartHostHandle | null) => {
+    if (handle) chartRefs.current.set(id, handle);
+    else chartRefs.current.delete(id);
+  }, []);
 
   // Global layer selector — drives any chart with `layerAware: true`. Synced
   // to ?layer=... so reloads / shared links keep the view.
@@ -432,9 +447,49 @@ function Reports() {
   }, [analysisCharts]);
   const sortedDiagnostics = chartCtx.sortedDiagnostics;
 
+  // Pull cached chart-summary captions out of React Query so embedded images
+  // get human-readable captions when the user has generated them.
+  const captionFor = useCallback(
+    (chartId: string): string | null => {
+      const queries = queryClient.getQueryCache().findAll({ queryKey: ['chart-summary'] });
+      for (const q of queries) {
+        const key = q.queryKey as unknown[];
+        if (key[1] !== chartId) continue;
+        if (key[2] !== routeProjectId) continue;
+        const data = q.state.data as { summary?: string } | undefined;
+        if (data?.summary) return data.summary;
+      }
+      return null;
+    },
+    [queryClient, routeProjectId],
+  );
+
+  // Capture all exportByDefault charts. Sets `exporting` so lazy-loaded cards
+  // and the clustering accordion render before html2canvas runs.
+  const captureChartsForDownload = useCallback(async (): Promise<CapturedChart[]> => {
+    if (!hasAnalysis) return [];
+    setExporting(true);
+    try {
+      // Two paint frames — first lets React commit `exporting=true`,
+      // second lets ChartHosts unfold lazy bodies + the accordion.
+      await waitForPaint();
+      await waitForPaint();
+      return await captureChartsForReport({
+        charts: CHART_REGISTRY.filter((c) => c.tab === 'analysis'),
+        ctx: chartCtx,
+        refs: chartRefs.current,
+        captionFor,
+      });
+    } finally {
+      setExporting(false);
+    }
+  }, [hasAnalysis, chartCtx, captionFor]);
+
   // Downloads
-  const handleDownloadMarkdown = () => {
+  const handleDownloadMarkdown = useCallback(async () => {
     if (!zoneAnalysisResult) return;
+    toast({ title: 'Capturing charts…', status: 'info', duration: 2000 });
+    const chartImages = await captureChartsForDownload();
     const md = generateReport({
       projectName,
       pipelineResult,
@@ -442,6 +497,7 @@ function Reports() {
       designResult: designStrategyResult,
       radarProfiles: zoneAnalysisResult.radar_profiles ?? null,
       correlationByLayer: zoneAnalysisResult.correlation_by_layer ?? null,
+      chartImages,
     });
     const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -450,8 +506,13 @@ function Reports() {
     a.download = `${projectName.replace(/\s+/g, '_')}_report.md`;
     a.click();
     URL.revokeObjectURL(url);
-    toast({ title: 'Report downloaded', status: 'success' });
-  };
+    toast({
+      title: chartImages.length > 0
+        ? `Report downloaded — ${chartImages.length} chart(s) embedded`
+        : 'Report downloaded (no charts captured)',
+      status: 'success',
+    });
+  }, [zoneAnalysisResult, captureChartsForDownload, projectName, pipelineResult, designStrategyResult, toast]);
 
   const handleExportJson = () => {
     // Per-image metrics: flatten uploaded_images to id + zone + GPS + metrics
@@ -505,8 +566,9 @@ function Reports() {
 
   const handleDownloadPdf = useCallback(async () => {
     if (!zoneAnalysisResult) return;
-    toast({ title: 'Generating PDF...', status: 'info', duration: 2000 });
+    toast({ title: 'Capturing charts…', status: 'info', duration: 2000 });
     try {
+      const chartImages = await captureChartsForDownload();
       const { jsPDF } = await import('jspdf');
       const md = generateReport({
         projectName,
@@ -537,6 +599,44 @@ function Reports() {
         }
       };
 
+      const addChartImage = (chart: CapturedChart) => {
+        // Equal-aspect resize: cap width at pageW, scale height proportionally,
+        // then if it would overflow 60% of the page height shrink to fit.
+        const aspect = chart.heightPx > 0 ? chart.widthPx / chart.heightPx : 1;
+        let imgW = pageW;
+        let imgH = imgW / aspect;
+        const maxH = pageH * 0.6;
+        if (imgH > maxH) {
+          imgH = maxH;
+          imgW = imgH * aspect;
+        }
+        if (y + imgH + 12 > margin + pageH) {
+          pdf.addPage();
+          y = margin;
+        }
+        addText(chart.title, 11, 'bold');
+        try {
+          pdf.addImage(chart.dataURL, 'PNG', margin, y, imgW, imgH, undefined, 'FAST');
+        } catch (err) {
+          console.warn('PDF addImage failed for', chart.chart_id, err);
+        }
+        y += imgH + 2;
+        if (chart.caption) {
+          pdf.setFontSize(8);
+          pdf.setFont('helvetica', 'italic');
+          pdf.setTextColor(110);
+          const captionLines = pdf.splitTextToSize(chart.caption, pageW);
+          for (const line of captionLines) {
+            if (y + 4 > margin + pageH) { pdf.addPage(); y = margin; }
+            pdf.text(line, margin, y);
+            y += 3.5;
+          }
+          pdf.setTextColor(0);
+          pdf.setFont('helvetica', 'normal');
+        }
+        y += 4;
+      };
+
       // Title page
       pdf.setFontSize(20);
       pdf.setFont('helvetica', 'bold');
@@ -551,12 +651,27 @@ function Reports() {
         pdf.text(`Calculations: ${pipelineResult.calculations_succeeded} succeeded`, margin, 76);
         pdf.text(`Zone Stats: ${pipelineResult.zone_statistics_count}`, margin, 82);
         pdf.text(`Zones: ${sortedDiagnostics.length}`, margin, 88);
+        if (chartImages.length > 0) {
+          pdf.text(`Embedded Charts: ${chartImages.length}`, margin, 94);
+        }
       }
       pdf.addPage();
       y = margin;
 
-      // Render markdown content
+      // Embedded charts page (right after title, before text body)
+      if (chartImages.length > 0) {
+        addText('Charts', 16, 'bold');
+        y += 2;
+        for (const chart of chartImages) {
+          addChartImage(chart);
+        }
+        pdf.addPage();
+        y = margin;
+      }
+
+      // Render markdown content (text body — image lines already embedded above)
       for (const line of md.split('\n')) {
+        if (line.startsWith('![')) continue; // images already embedded
         if (line.startsWith('### ')) {
           y += 2;
           addText(line.slice(4), 12, 'bold');
@@ -598,11 +713,17 @@ function Reports() {
       }
 
       pdf.save(`${projectName.replace(/\s+/g, '_')}_report.pdf`);
-      toast({ title: 'PDF downloaded', status: 'success' });
-    } catch {
+      toast({
+        title: chartImages.length > 0
+          ? `PDF downloaded — ${chartImages.length} chart(s) embedded`
+          : 'PDF downloaded',
+        status: 'success',
+      });
+    } catch (err) {
+      console.error('PDF generation failed', err);
       toast({ title: 'PDF generation failed', status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategyResult, pipelineResult, projectName, sortedDiagnostics, toast]);
+  }, [zoneAnalysisResult, designStrategyResult, pipelineResult, projectName, sortedDiagnostics, toast, captureChartsForDownload]);
 
   const handleDownloadAiReportPdf = useCallback(async () => {
     if (!aiReport) return;
@@ -934,12 +1055,14 @@ function Reports() {
                             {charts.map(chart => (
                               <ChartHost
                                 key={chart.id}
+                                ref={setChartRef(chart.id)}
                                 descriptor={chart}
                                 ctx={chartCtx}
                                 onHide={toggleChart}
                                 projectId={routeProjectId ?? null}
                                 projectContext={chartProjectContext}
                                 showAiSummary={showAiSummary}
+                                forceMount={exporting}
                               />
                             ))}
                           </VStack>
@@ -961,8 +1084,10 @@ function Reports() {
                       </Alert>
                     )}
 
-                    {/* Clustering — collapsed group (5.9) */}
-                    <Accordion allowToggle>
+                    {/* Clustering — collapsed group (5.9). Forced open during
+                        report export so the inner ChartHosts get a chance to
+                        render before captureChartsForReport runs. */}
+                    <Accordion allowToggle index={exporting ? [0] : undefined}>
                       <AccordionItem border="1px solid" borderColor="gray.200" borderRadius="md">
                         <AccordionButton bg="gray.50" _hover={{ bg: 'gray.100' }}>
                           <Box flex="1" textAlign="left">
@@ -1011,12 +1136,14 @@ function Reports() {
                             {clusteringCharts.map(chart => (
                               <ChartHost
                                 key={chart.id}
+                                ref={setChartRef(chart.id)}
                                 descriptor={chart}
                                 ctx={chartCtx}
                                 onHide={toggleChart}
                                 projectId={routeProjectId ?? null}
                                 projectContext={chartProjectContext}
                                 showAiSummary={showAiSummary}
+                                forceMount={exporting}
                               />
                             ))}
                           </VStack>

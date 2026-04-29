@@ -130,6 +130,11 @@ export interface ChartDescriptor {
    * If absent, ChartHost sends a minimal placeholder.
    */
   summaryPayload?: (ctx: ChartContext) => Record<string, unknown>;
+  /**
+   * 6.B(1) — when true, the chart is included in the embedded report by
+   * default. Other charts can still be opted in via the Customize panel.
+   */
+  exportByDefault?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +223,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     section: 'overview',
     description:
       'Horizontal bar of each zone ranked by mean |z-score| across indicators (full layer).',
+    exportByDefault: true,
     isAvailable: (ctx) => ctx.sortedDiagnostics.length > 0,
     render: (ctx) => <ZonePriorityChart diagnostics={ctx.sortedDiagnostics} />,
     summaryPayload: (ctx) => ({
@@ -254,6 +260,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     tab: 'analysis',
     section: 'spatial',
     layerAware: true,
+    exportByDefault: true,
     description:
       'Three views of the GPS scatter: Layer Coverage shows where each FMB layer has data; Value Heatmap colors points by raw indicator value; Z-Deviation highlights the most distinctive indicator at each point.',
     isAvailable: (ctx) => ctx.gpsImages.length > 0 && ctx.gpsIndicatorIds.length > 0,
@@ -325,6 +332,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     tab: 'analysis',
     section: 'comparison',
     layerAware: true,
+    exportByDefault: true,
     description:
       "All zones overlaid on one radar — percentile scores. Use the Layer toggle at the top of this tab to switch between Full / FG / MG / BG views.",
     isAvailable: (ctx) => {
@@ -424,6 +432,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     tab: 'analysis',
     section: 'correlation',
     layerAware: true,
+    exportByDefault: true,
     description:
       'Pairwise correlation between indicators on the selected layer. Single-zone projects fall back to image-level correlations.',
     isAvailable: (ctx) => !!ctx.correlationData && ctx.correlationData.indicators.length > 0,

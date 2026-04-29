@@ -3,6 +3,7 @@ import type {
   DesignStrategyResult,
   ProjectPipelineResult,
 } from '../types';
+import type { CapturedChart } from './captureCharts';
 
 function fmt(v: number | null | undefined, decimals = 2): string {
   if (v === null || v === undefined) return '-';
@@ -26,9 +27,25 @@ export function generateReport(params: {
   designResult?: DesignStrategyResult | null;
   radarProfiles?: Record<string, Record<string, number>> | null;
   correlationByLayer?: Record<string, Record<string, Record<string, number>>> | null;
+  /** 6.B(1) — captured charts to embed inline as base64 PNG. */
+  chartImages?: CapturedChart[];
 }): string {
-  const { projectName, pipelineResult, zoneResult, designResult, radarProfiles, correlationByLayer } = params;
+  const { projectName, pipelineResult, zoneResult, designResult, radarProfiles, correlationByLayer, chartImages } = params;
   const sections: string[] = [];
+
+  // chart_id → markdown image block (used to interleave charts with their
+  // narrative section). Stripping the `data:image/png;base64,` prefix isn't
+  // necessary — markdown renderers accept full data URLs.
+  const imageById = new Map<string, CapturedChart>(
+    (chartImages ?? []).map((c) => [c.chart_id, c]),
+  );
+  const renderImage = (chartId: string): string | null => {
+    const c = imageById.get(chartId);
+    if (!c) return null;
+    const altText = c.title.replace(/[[\]]/g, '');
+    const block = `![${altText}](${c.dataURL})`;
+    return c.caption ? `${block}\n\n*${c.caption}*` : block;
+  };
 
   // 1. Header
   const now = new Date();
@@ -61,10 +78,19 @@ export function generateReport(params: {
   const sortedDiags = [...zoneResult.zone_diagnostics].sort((a, b) => b.mean_abs_z - a.mean_abs_z);
   if (sortedDiags.length > 0) {
     sections.push('## Zone Diagnostics Overview');
+    const zoneDevImg = renderImage('zone-deviation-overview');
+    if (zoneDevImg) sections.push(zoneDevImg);
     sections.push(mdTable(
-      ['Zone Name', 'Mean |Z|', 'Rank', 'Points'],
+      ['Zone Name', 'Mean |z|', 'Rank', 'Points'],
       sortedDiags.map(d => [d.zone_name, fmt(d.mean_abs_z), String(d.rank), String(d.point_count)]),
     ));
+  }
+
+  // 3.5 Spatial overview (image-only — no text counterpart in this export)
+  const spatialImg = renderImage('spatial-overview');
+  if (spatialImg) {
+    sections.push('## Spatial Distribution');
+    sections.push(spatialImg);
   }
 
   // 4. Zone Statistics — Full Layer
@@ -108,6 +134,8 @@ export function generateReport(params: {
     ).sort();
     if (allIndicators.length > 0) {
       sections.push('## Radar Profiles');
+      const radarImg = renderImage('radar-profiles');
+      if (radarImg) sections.push(radarImg);
       sections.push(mdTable(
         ['Indicator', ...zones],
         allIndicators.map(ind =>
@@ -124,6 +152,8 @@ export function generateReport(params: {
       const indicators = Object.keys(corr).sort();
       if (indicators.length > 0) {
         sections.push('## Correlation Matrix — Full Layer');
+        const corrImg = renderImage('correlation-heatmap');
+        if (corrImg) sections.push(corrImg);
         sections.push(mdTable(
           ['', ...indicators],
           indicators.map(row =>
@@ -131,6 +161,24 @@ export function generateReport(params: {
           ),
         ));
       }
+    }
+  }
+
+  // 7.5 Any extra opted-in charts that don't have a text counterpart yet
+  const renderedIds = new Set([
+    'zone-deviation-overview',
+    'spatial-overview',
+    'radar-profiles',
+    'correlation-heatmap',
+  ]);
+  const extras = (chartImages ?? []).filter((c) => !renderedIds.has(c.chart_id));
+  if (extras.length > 0) {
+    sections.push('## Additional Charts');
+    for (const c of extras) {
+      sections.push(`### ${c.title}`);
+      const altText = c.title.replace(/[[\]]/g, '');
+      sections.push(`![${altText}](${c.dataURL})`);
+      if (c.caption) sections.push(`*${c.caption}*`);
     }
   }
 
