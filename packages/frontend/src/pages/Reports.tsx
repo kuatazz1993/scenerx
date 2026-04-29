@@ -1,5 +1,6 @@
 import { useMemo, useCallback, useState, useEffect } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Box,
   Heading,
@@ -157,9 +158,41 @@ function renderMarkdown(md: string) {
 // Reports Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Walk the React Query cache for chart-summary entries belonging to the
+ * current project and roll them into the analysis_narratives shape consumed
+ * by the design-strategies endpoint. All current registry summaries are
+ * cross-zone, so we file them under "_global".
+ */
+function collectAnalysisNarratives(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectId: string | null | undefined,
+): Record<string, Record<string, string>> {
+  if (!projectId) return {};
+  const queries = queryClient.getQueryCache().findAll({ queryKey: ['chart-summary'] });
+  const globals: Record<string, string> = {};
+  for (const q of queries) {
+    const key = q.queryKey as unknown[];
+    if (key[2] !== projectId) continue;
+    const data = q.state.data as
+      | { summary?: string; highlight_points?: string[] }
+      | undefined;
+    if (!data?.summary) continue;
+    const chartId = String(key[1] ?? '');
+    if (!chartId) continue;
+    const bullets = data.highlight_points?.length
+      ? '\n  • ' + data.highlight_points.join('\n  • ')
+      : '';
+    globals[chartId] = `${data.summary}${bullets}`;
+  }
+  if (Object.keys(globals).length === 0) return {};
+  return { _global: globals };
+}
+
 function Reports() {
   const { projectId: routeProjectId } = useParams<{ projectId: string }>();
   const toast = useAppToast();
+  const queryClient = useQueryClient();
 
   const {
     currentProject,
@@ -224,8 +257,10 @@ function Reports() {
     if (!zoneAnalysisResult) return;
     toast({ title: 'Retrying design strategies...', status: 'info', duration: 3000 });
     try {
+      const narratives = collectAnalysisNarratives(queryClient, routeProjectId);
       const result = await designStrategiesMutation.mutateAsync({
         zone_analysis: zoneAnalysisResult,
+        analysis_narratives: narratives,
         use_llm: true,
       });
       useAppStore.getState().setDesignStrategyResult(result);
@@ -236,7 +271,7 @@ function Reports() {
         : 'Strategy generation failed';
       toast({ title: msg, status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategiesMutation, toast]);
+  }, [zoneAnalysisResult, designStrategiesMutation, toast, queryClient, routeProjectId]);
 
   const handleRunClustering = useCallback(async () => {
     if (!zoneAnalysisResult || !currentProject) return;
@@ -277,7 +312,9 @@ function Reports() {
       const request: ReportRequest = {
         zone_analysis: zoneAnalysisCompact as typeof zoneAnalysisResult,
         design_strategies: designStrategyResult ?? undefined,
-        stage1_recommendations: recommendations.length > 0 ? recommendations : undefined,
+        stage1_recommendations: recommendations.length > 0
+          ? (recommendations as unknown as Record<string, unknown>[])
+          : undefined,
         project_context: currentProject ? {
           project: { name: currentProject.project_name, location: currentProject.project_location },
           context: {

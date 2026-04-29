@@ -294,6 +294,10 @@ class DesignStrategyRequest(BaseModel):
     use_llm: bool = True
     max_ioms_per_query: int = Field(default=6, ge=1, le=20)
     max_strategies_per_zone: int = Field(default=5, ge=1, le=10)
+    # 6.A — Stage 2 chart captions piped into Agent A's diagnosis prompt.
+    # Shape: {zone_id: {chart_id: caption_text}}. zone_id "_global" carries
+    # captions for charts that aren't per-zone (correlation, distribution, ...).
+    analysis_narratives: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class DesignStrategyResult(BaseModel):
