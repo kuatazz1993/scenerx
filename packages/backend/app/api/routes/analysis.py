@@ -41,8 +41,18 @@ from app.services.clustering_service import ClusteringService
 from app.services.metrics_calculator import MetricsCalculator
 from app.services.metrics_manager import MetricsManager
 from app.services.metrics_aggregator import MetricsAggregator
-from app.api.deps import get_zone_analyzer, get_design_engine, get_clustering_service, get_metrics_calculator, get_metrics_manager, get_current_user, get_report_service
+from app.api.deps import (
+    get_zone_analyzer,
+    get_design_engine,
+    get_clustering_service,
+    get_metrics_calculator,
+    get_metrics_manager,
+    get_current_user,
+    get_report_service,
+    get_chart_summary_service,
+)
 from app.services.report_service import ReportService
+from app.services.chart_summary_service import ChartSummaryService
 from app.models.user import UserResponse
 from app.api.routes.projects import get_projects_store
 
@@ -356,6 +366,55 @@ async def generate_report(
         return await report_service.generate_report(request)
     except Exception as e:
         logger.error("Report generation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Per-Chart LLM Summary (5.10.4)
+# ---------------------------------------------------------------------------
+
+
+class ChartSummaryRequest(BaseModel):
+    chart_id: str
+    chart_title: str
+    chart_description: Optional[str] = None
+    project_id: str
+    payload: dict[str, Any]
+    project_context: Optional[dict[str, Any]] = None
+
+
+class ChartSummaryResponse(BaseModel):
+    summary: str
+    highlight_points: list[str]
+    cached: bool
+    model: str = ""
+    error: Optional[str] = None
+
+
+@router.post("/chart-summary", response_model=ChartSummaryResponse)
+async def chart_summary(
+    request: ChartSummaryRequest,
+    service: ChartSummaryService = Depends(get_chart_summary_service),
+    _user: UserResponse = Depends(get_current_user),
+):
+    """Return a short LLM interpretation of a single chart payload.
+
+    Cache-first: identical (chart_id, project_id, hash(payload)) tuples reuse
+    a previous answer without an LLM round-trip. Used by the "What this means"
+    expandable on each ChartHost card.
+    """
+    try:
+        result = await service.generate(
+            chart_id=request.chart_id,
+            chart_title=request.chart_title,
+            chart_description=request.chart_description,
+            project_id=request.project_id,
+            payload=request.payload,
+            project_context=request.project_context,
+        )
+        return ChartSummaryResponse(**result)
+    except Exception as e:
+        logger.error("Chart summary failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -23,6 +23,7 @@ from app.services.zone_analyzer import ZoneAnalyzer
 from app.services.clustering_service import ClusteringService
 from app.services.design_engine import DesignEngine
 from app.services.report_service import ReportService
+from app.services.chart_summary_service import ChartSummaryService
 
 
 # Settings dependency
@@ -42,6 +43,7 @@ _zone_analyzer: ZoneAnalyzer = None
 _design_engine: DesignEngine = None
 _clustering_service: ClusteringService = None
 _report_service: ReportService = None
+_chart_summary_service: ChartSummaryService = None
 
 # Runtime provider override (None = use settings default)
 _active_provider: Optional[str] = None
@@ -185,10 +187,21 @@ def get_report_service() -> ReportService:
     return _report_service
 
 
+def get_chart_summary_service() -> ChartSummaryService:
+    """Get ChartSummaryService singleton (per-chart LLM caption cache)."""
+    global _chart_summary_service
+    if _chart_summary_service is None:
+        settings = get_settings()
+        llm = get_llm_client()
+        cache_path = settings.data_path / "chart_summary_cache.sqlite"
+        _chart_summary_service = ChartSummaryService(llm_client=llm, cache_db_path=cache_path)
+    return _chart_summary_service
+
+
 def switch_llm_provider(provider: str, model: Optional[str] = None):
     """Switch active LLM provider at runtime. Resets dependent singletons."""
     global _llm_client, _active_provider, _active_model
-    global _recommendation_service, _design_engine, _report_service
+    global _recommendation_service, _design_engine, _report_service, _chart_summary_service
     _active_provider = provider
     _active_model = model
     # Reset singletons that depend on LLM
@@ -196,6 +209,7 @@ def switch_llm_provider(provider: str, model: Optional[str] = None):
     _recommendation_service = None
     _design_engine = None
     _report_service = None
+    _chart_summary_service = None
 
 
 def get_active_provider() -> str:
@@ -208,7 +222,7 @@ def reset_services() -> None:
     global _vision_client, _metrics_manager, _metrics_calculator
     global _knowledge_base, _recommendation_service, _llm_client
     global _zone_analyzer, _design_engine, _clustering_service
-    global _report_service
+    global _report_service, _chart_summary_service
     global _active_provider, _active_model
 
     _vision_client = None
@@ -221,6 +235,7 @@ def reset_services() -> None:
     _design_engine = None
     _clustering_service = None
     _report_service = None
+    _chart_summary_service = None
     _active_provider = None
     _active_model = None
 

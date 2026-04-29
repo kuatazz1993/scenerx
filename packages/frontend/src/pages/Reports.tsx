@@ -347,6 +347,22 @@ function Reports() {
     [zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer],
   );
 
+  // Compact project context handed to chart-summary requests so LLM grounding
+  // doesn't require a separate fetch per chart.
+  const chartProjectContext = useMemo<Record<string, unknown> | null>(() => {
+    if (!currentProject) return null;
+    return {
+      project_name: currentProject.project_name,
+      project_location: currentProject.project_location,
+      koppen_zone: currentProject.koppen_zone_id,
+      space_type: currentProject.space_type_id,
+      lcz_type: currentProject.lcz_type_id,
+      age_group: currentProject.age_group_id,
+      performance_dimensions: currentProject.performance_dimensions,
+      design_brief: currentProject.design_brief,
+    };
+  }, [currentProject]);
+
   const hiddenSet = useMemo(() => new Set(hiddenChartIds), [hiddenChartIds]);
   // Unified analysis tab — all 'analysis' charts (formerly split between diagnostics+statistics)
   const analysisCharts = useMemo(
@@ -858,6 +874,8 @@ function Reports() {
                                 descriptor={chart}
                                 ctx={chartCtx}
                                 onHide={toggleChart}
+                                projectId={routeProjectId ?? null}
+                                projectContext={chartProjectContext}
                               />
                             ))}
                           </VStack>
@@ -932,6 +950,8 @@ function Reports() {
                                 descriptor={chart}
                                 ctx={chartCtx}
                                 onHide={toggleChart}
+                                projectId={routeProjectId ?? null}
+                                projectContext={chartProjectContext}
                               />
                             ))}
                           </VStack>

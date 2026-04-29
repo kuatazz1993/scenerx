@@ -339,6 +339,21 @@ export const api = {
     },
     generateReport: (data: ReportRequest) =>
       apiClient.post<ReportResult>('/api/analysis/generate-report', data),
+    chartSummary: (data: {
+      chart_id: string;
+      chart_title: string;
+      chart_description?: string | null;
+      project_id: string;
+      payload: Record<string, unknown>;
+      project_context?: Record<string, unknown> | null;
+    }) =>
+      apiClient.post<{
+        summary: string;
+        highlight_points: string[];
+        cached: boolean;
+        model: string;
+        error?: string | null;
+      }>('/api/analysis/chart-summary', data),
   },
 
   // Auth

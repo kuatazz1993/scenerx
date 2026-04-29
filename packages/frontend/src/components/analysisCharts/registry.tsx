@@ -124,6 +124,12 @@ export interface ChartDescriptor {
   render: (ctx: ChartContext) => ReactNode;
   /** Whether the chart reacts to the layer selector (re-rendered on layer change) */
   layerAware?: boolean;
+  /**
+   * Returns a small JSON-serialisable slice of context for the LLM summary
+   * (5.10.4). Keep it under ~6KB — the backend truncates anything bigger.
+   * If absent, ChartHost sends a minimal placeholder.
+   */
+  summaryPayload?: (ctx: ChartContext) => Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +220,15 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
       'Horizontal bar of each zone ranked by mean |z-score| across indicators (full layer).',
     isAvailable: (ctx) => ctx.sortedDiagnostics.length > 0,
     render: (ctx) => <ZonePriorityChart diagnostics={ctx.sortedDiagnostics} />,
+    summaryPayload: (ctx) => ({
+      analysis_mode: ctx.analysisMode,
+      zones: ctx.sortedDiagnostics.map((d) => ({
+        zone: d.zone_name,
+        mean_abs_z: d.mean_abs_z,
+        rank: d.rank,
+        points: d.point_count,
+      })),
+    }),
   },
   {
     id: 'priority-heatmap',
@@ -321,6 +336,11 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
         </Box>
       );
     },
+    summaryPayload: (ctx) => ({
+      layer: ctx.selectedLayer,
+      analysis_mode: ctx.analysisMode,
+      profiles: resolveRadarProfiles(ctx) ?? {},
+    }),
   },
   {
     id: 'zone-indicator-matrix',
@@ -402,6 +422,26 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     render: (ctx) => {
       const cd = ctx.correlationData!;
       return <CorrelationHeatmap corr={cd.corr} pval={cd.pval} indicators={cd.indicators} />;
+    },
+    summaryPayload: (ctx) => {
+      const cd = ctx.correlationData;
+      if (!cd) return { layer: ctx.selectedLayer, pairs: [] };
+      const pairs: { a: string; b: string; r: number }[] = [];
+      for (let i = 0; i < cd.indicators.length; i++) {
+        for (let j = i + 1; j < cd.indicators.length; j++) {
+          const a = cd.indicators[i];
+          const b = cd.indicators[j];
+          const r = cd.corr[a]?.[b];
+          if (r != null) pairs.push({ a, b, r });
+        }
+      }
+      // Send the strongest 12 pairs by |r| — keeps payload small.
+      pairs.sort((x, y) => Math.abs(y.r) - Math.abs(x.r));
+      return {
+        layer: ctx.selectedLayer,
+        analysis_mode: ctx.analysisMode,
+        strongest_pairs: pairs.slice(0, 12),
+      };
     },
   },
 
