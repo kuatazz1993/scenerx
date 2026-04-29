@@ -723,7 +723,7 @@ function Reports() {
       ) : (
         <Box>
           {/* Pipeline Overview */}
-          <Card mb={6}>
+          <Card mb={6} role="region" aria-label="Pipeline overview">
             <CardHeader>
               <HStack justify="space-between">
                 <Heading size="md">Pipeline Overview</Heading>
@@ -759,7 +759,14 @@ function Reports() {
 
           {/* AI Report Section — always visible when analysis exists */}
           {hasAnalysis && (
-            <Card mb={6} borderColor={aiReport ? 'purple.300' : 'gray.200'} borderWidth={aiReport ? 2 : 1} overflow="hidden">
+            <Card
+              mb={6}
+              borderColor={aiReport ? 'purple.300' : 'gray.200'}
+              borderWidth={aiReport ? 2 : 1}
+              overflow="hidden"
+              role="region"
+              aria-label="AI-generated report"
+            >
               <CardHeader>
                 <VStack align="stretch" spacing={3}>
                   <HStack spacing={2} flexWrap="wrap">
@@ -904,9 +911,9 @@ function Reports() {
                                   {diag.rank > 0 && <Badge colorScheme="purple" fontSize="xs">#{diag.rank}</Badge>}
                                   <Text fontWeight="bold" fontSize="sm" noOfLines={1}>{diag.zone_name}</Text>
                                 </HStack>
-                                <Badge colorScheme={deviationColorScheme(diag.mean_abs_z)}>|z|={diag.mean_abs_z?.toFixed(2) ?? '-'}</Badge>
+                                <Badge colorScheme={deviationColorScheme(diag.mean_abs_z)}>|z|={diag.mean_abs_z?.toFixed(2) ?? '—'}</Badge>
                               </HStack>
-                              <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Mean |Z-score|</Text><Text fontWeight="bold">{diag.mean_abs_z?.toFixed(2) ?? '-'}</Text></HStack>
+                              <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Mean |z|</Text><Text fontWeight="bold">{diag.mean_abs_z?.toFixed(2) ?? '—'}</Text></HStack>
                               <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Points</Text><Text fontWeight="bold">{diag.point_count}</Text></HStack>
                             </VStack>
                           </CardBody>
@@ -1056,7 +1063,7 @@ function Reports() {
                           <HStack flex="1" justify="space-between" pr={2}>
                             <HStack spacing={3}>
                               <Text fontWeight="bold">{zone.zone_name}</Text>
-                              <Badge colorScheme={deviationColorScheme(zone.mean_abs_z)}>|z|={zone.mean_abs_z?.toFixed(2) ?? '-'}</Badge>
+                              <Badge colorScheme={deviationColorScheme(zone.mean_abs_z)}>|z|={zone.mean_abs_z?.toFixed(2) ?? '—'}</Badge>
                             </HStack>
                             <Text fontSize="sm" color="gray.500">{zone.design_strategies.length} strategies</Text>
                           </HStack>

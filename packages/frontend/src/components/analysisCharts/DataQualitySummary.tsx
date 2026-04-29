@@ -121,7 +121,13 @@ export function DataQualitySummary({ ctx, reportWarning }: DataQualitySummaryPro
       : 'ok';
 
   return (
-    <Card mb={6} borderColor={overallStatus === 'ok' ? 'green.200' : 'orange.200'} borderWidth={1}>
+    <Card
+      mb={6}
+      borderColor={overallStatus === 'ok' ? 'green.200' : 'orange.200'}
+      borderWidth={1}
+      role="region"
+      aria-label="Data quality summary"
+    >
       <CardHeader pb={2}>
         <HStack justify="space-between">
           <HStack spacing={2}>

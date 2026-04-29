@@ -126,7 +126,11 @@ export function ChartHost({
   const aiPanelEnabled = showAiSummary && !!projectId;
 
   return (
-    <Card ref={cardRef}>
+    <Card
+      ref={cardRef}
+      role="region"
+      aria-label={descriptor.title}
+    >
       <CardHeader pb={2}>
         <HStack justify="space-between" align="start">
           <Box flex="1" minW={0}>

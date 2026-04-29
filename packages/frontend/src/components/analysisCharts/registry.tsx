@@ -236,7 +236,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     tab: 'analysis',
     section: 'overview',
     description:
-      'Z-score grid: rows = zones, columns = indicators (full layer). Red = above mean, blue = below.',
+      'z-score grid: rows = zones, columns = indicators (full layer). Red = above mean, blue = below.',
     isAvailable: (ctx) => ctx.sortedDiagnostics.length > 0,
     render: (ctx) => (
       <PriorityHeatmap
@@ -584,7 +584,7 @@ export const CHART_REGISTRY: ChartDescriptor[] = [
     title: 'Archetype Radar Profiles',
     tab: 'analysis',
     section: 'clustering',
-    description: 'Z-score radar for each discovered archetype.',
+    description: 'z-score radar for each discovered archetype.',
     isAvailable: (ctx) =>
       !!ctx.effectiveClustering && ctx.effectiveClustering.archetype_profiles.length > 0,
     render: (ctx) => (

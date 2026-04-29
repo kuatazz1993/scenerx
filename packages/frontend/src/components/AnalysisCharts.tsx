@@ -219,10 +219,10 @@ export function ZonePriorityChart({ diagnostics }: ZonePriorityChartProps) {
         <Tooltip
           formatter={(value: number, name: string) => [
             value,
-            name === 'mean_abs_z' ? 'Mean |Z-score|' : 'Points',
+            name === 'mean_abs_z' ? 'Mean |z|' : 'Points',
           ]}
         />
-        <Bar dataKey="mean_abs_z" name="Mean |Z-score|" barSize={20}>
+        <Bar dataKey="mean_abs_z" name="Mean |z|" barSize={20}>
           {data.map((entry, i) => (
             <Cell key={i} fill={deviationBarColor(entry.mean_abs_z)} />
           ))}
@@ -316,7 +316,7 @@ export function CorrelationHeatmap({ corr, pval, indicators, colorblindMode }: C
                     stroke="#E2E8F0"
                     strokeWidth={0.5}
                   >
-                    <title>{`${row} × ${col}: ${val != null ? val.toFixed(3) : '-'}${stars ? ` (p${stars})` : ''}`}</title>
+                    <title>{`${row} × ${col}: ${val != null ? val.toFixed(3) : '—'}${stars ? ` (p${stars})` : ''}`}</title>
                   </rect>
                   <text
                     x={labelWidth + ci * cellSize + (cellSize - 2) / 2}
@@ -326,7 +326,7 @@ export function CorrelationHeatmap({ corr, pval, indicators, colorblindMode }: C
                     fill={val != null && Math.abs(val) > 0.6 ? '#fff' : '#2D3748'}
                     pointerEvents="none"
                   >
-                    {val != null ? val.toFixed(2) : '-'}
+                    {val != null ? val.toFixed(2) : '—'}
                   </text>
                   {stars && (
                     <text
@@ -1861,8 +1861,12 @@ export function GlobalStatsTable({ stats }: GlobalStatsTableProps) {
           const layerKeys = ['full', 'foreground', 'middleground', 'background'];
           const layerVals = layerKeys.map(l => s.by_layer[l]);
           const cells: string[] = [
-            ...layerVals.map(v => v ? `${v.Mean?.toFixed(1)}±${v.Std?.toFixed(1)}` : '-'),
-            s.cv_full != null ? `${s.cv_full.toFixed(0)}` : '-',
+            ...layerVals.map(v =>
+              v && v.Mean != null && v.Std != null
+                ? `${v.Mean.toFixed(1)}±${v.Std.toFixed(1)}`
+                : '—',
+            ),
+            s.cv_full != null ? `${s.cv_full.toFixed(0)}` : '—',
             fmtP(s.shapiro_p),
             fmtP(s.kruskal_p),
           ];
@@ -1932,9 +1936,9 @@ export function DataQualityTable({ rows }: DataQualityTableProps) {
           const y = headerH + ri * rowH;
           const cells: string[] = [
             String(r.total_images),
-            r.fg_coverage_pct != null ? `${r.fg_coverage_pct.toFixed(0)}` : '-',
-            r.mg_coverage_pct != null ? `${r.mg_coverage_pct.toFixed(0)}` : '-',
-            r.bg_coverage_pct != null ? `${r.bg_coverage_pct.toFixed(0)}` : '-',
+            r.fg_coverage_pct != null ? `${r.fg_coverage_pct.toFixed(0)}` : '—',
+            r.mg_coverage_pct != null ? `${r.mg_coverage_pct.toFixed(0)}` : '—',
+            r.bg_coverage_pct != null ? `${r.bg_coverage_pct.toFixed(0)}` : '—',
             r.is_normal == null ? '-' : r.is_normal ? 'Yes' : 'No',
             r.correlation_method,
           ];
