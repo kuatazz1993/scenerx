@@ -51,15 +51,16 @@ import EmptyState from '../components/EmptyState';
 import {
   CHART_REGISTRY,
   SECTION_ORDER,
-  SectionHeading,
   type ChartSection,
 } from '../components/analysisCharts/registry';
+import { SectionHeading } from '../components/analysisCharts/SectionHeading';
 import { ChartHost, type ChartHostHandle } from '../components/analysisCharts/ChartHost';
 import { ChartPicker } from '../components/analysisCharts/ChartPicker';
 import { buildChartContext } from '../components/analysisCharts/ChartContext';
 import { ModeAlert } from '../components/analysisCharts/ModeAlert';
 import { DataQualitySummary } from '../components/analysisCharts/DataQualitySummary';
-import { LayerSelector, LAYER_OPTIONS } from '../components/analysisCharts/LayerSelector';
+import { LayerSelector } from '../components/analysisCharts/LayerSelector';
+import { LAYER_OPTIONS } from '../components/analysisCharts/layerOptions';
 import { AnalysisConfidenceGauge } from '../components/analysisCharts/AnalysisConfidenceGauge';
 import { GlossaryDrawer } from '../components/GlossaryDrawer';
 import {
@@ -374,7 +375,7 @@ function Reports() {
     } catch {
       toast({ title: 'AI report generation failed', status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategyResult, recommendations, currentProject, generateReportMutation, toast]);
+  }, [zoneAnalysisResult, designStrategyResult, recommendations, currentProject, generateReportMutation, toast, setAiReport, setAiReportMeta]);
 
   // Completion status
   const hasVision = (currentProject?.uploaded_images?.length ?? 0) > 0;

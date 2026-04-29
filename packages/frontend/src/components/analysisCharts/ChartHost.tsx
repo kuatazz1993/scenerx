@@ -153,7 +153,6 @@ export const ChartHost = forwardRef<ChartHostHandle, ChartHostProps>(
           return effectiveMounted;
         },
       }),
-      // eslint-disable-next-line react-hooks/exhaustive-deps
       [effectiveMounted, descriptor, ctx],
     );
 

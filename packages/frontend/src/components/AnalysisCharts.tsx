@@ -217,8 +217,8 @@ export function ZonePriorityChart({ diagnostics }: ZonePriorityChartProps) {
           width={120}
         />
         <Tooltip
-          formatter={(value: number, name: string) => [
-            value,
+          formatter={(value, name) => [
+            (typeof value === 'number' ? value : 0) as number,
             name === 'mean_abs_z' ? 'Mean |z|' : 'Points',
           ]}
         />
@@ -578,7 +578,7 @@ export function DescriptiveStatsChart({ stats, layer }: DescriptiveStatsChartPro
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis type="number" tick={{ fontSize: 10 }} />
         <YAxis type="category" dataKey="indicator" tick={{ fontSize: 9 }} width={100} />
-        <Tooltip formatter={(v: number, name: string) => [v.toFixed(3), name]} />
+        <Tooltip formatter={(v, name) => [typeof v === 'number' ? v.toFixed(3) : '—', name ?? '']} />
         <Legend wrapperStyle={{ fontSize: 11 }} />
         <Bar dataKey="mean" fill="#3182CE" name="Mean" barSize={14}>
           <ErrorBar dataKey="std" direction="x" stroke="#2D3748" strokeWidth={1} />
@@ -1683,7 +1683,7 @@ export function SilhouetteCurve({ scores, bestK }: SilhouetteCurveProps) {
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis dataKey="k" tick={{ fontSize: 11 }} label={{ value: 'Number of Clusters (K)', position: 'insideBottom', offset: -2, fontSize: 11 }} />
         <YAxis tick={{ fontSize: 11 }} label={{ value: 'Silhouette Score', angle: -90, position: 'insideLeft', fontSize: 11 }} domain={[0, 'auto']} />
-        <Tooltip formatter={(v: number) => [v.toFixed(4), 'Silhouette']} />
+        <Tooltip formatter={(v: number | undefined) => [v != null ? v.toFixed(4) : '—', 'Silhouette']} />
         <ReferenceLine x={bestK} stroke="#805AD5" strokeDasharray="5 5" label={{ value: `K=${bestK}`, position: 'top', fontSize: 10, fill: '#805AD5' }} />
         <Line type="monotone" dataKey="silhouette" stroke="#3182CE" strokeWidth={2} dot={{ r: 4, fill: '#3182CE' }} activeDot={{ r: 6 }} />
       </LineChart>

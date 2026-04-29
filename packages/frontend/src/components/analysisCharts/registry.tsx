@@ -16,7 +16,6 @@ import {
   Tab,
   TabPanels,
   TabPanel,
-  Heading,
 } from '@chakra-ui/react';
 import {
   RadarProfileChart,
@@ -619,17 +618,5 @@ export function getDescriptorBySection(
   return CHART_REGISTRY.filter((c) => c.section === section);
 }
 
-// Heading helper for Reports.tsx
-export function SectionHeading({ section }: { section: ChartSection }) {
-  const meta = SECTION_META[section];
-  return (
-    <Box mb={2} mt={2}>
-      <Heading size="sm" color="gray.700">
-        {meta.title}
-      </Heading>
-      <Text fontSize="xs" color="gray.500">
-        {meta.subtitle}
-      </Text>
-    </Box>
-  );
-}
+// SectionHeading lives in ./SectionHeading.tsx — registry.tsx stays a data
+// + helper module and avoids the react-refresh "mixed exports" warning.

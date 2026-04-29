@@ -43,7 +43,7 @@ import {
   CloseButton,
 } from '@chakra-ui/react';
 import { Grid as VirtualGrid } from 'react-window';
-import { ScanSearch, Download, Eye, Archive, Lightbulb, Check as CheckIcon } from 'lucide-react';
+import { ScanSearch, Download, Eye, Archive, Lightbulb } from 'lucide-react';
 import JSZip from 'jszip';
 import { useSemanticConfig, useProject, useRecommendIndicators, useCalculators } from '../hooks/useApi';
 import api from '../api';
@@ -246,7 +246,10 @@ function ImageSelectionGrid({
           rowHeight={ROW_H}
           style={{ height: gridHeight, width: containerWidth, overflowX: 'hidden' }}
           overscanCount={3}
-          cellComponent={ImageGridCell}
+          // react-window v2's strict cellComponent / cellProps typing rejects our
+          // memo-wrapped renderer + user-prop bag even though the runtime contract
+          // matches. Cast through `unknown` to keep the typecheck clean.
+          cellComponent={ImageGridCell as unknown as Parameters<typeof VirtualGrid>[0]['cellComponent']}
           cellProps={{
             images,
             cols: COLS,
@@ -254,14 +257,25 @@ function ImageSelectionGrid({
             selectedProjectImages,
             onToggle,
             gap: GAP,
-          }}
+          } as unknown as Parameters<typeof VirtualGrid>[0]['cellProps']}
         />
       )}
     </Box>
   );
 }
 
-/** Cell renderer for the virtualized image-selection grid. */
+/** Cell renderer for the virtualized image-selection grid. react-window v2
+ * injects {ariaAttributes, columnIndex, rowIndex, style} alongside the
+ * user-supplied cellProps. */
+interface ImageGridCellUserProps {
+  images: UploadedImage[];
+  cols: number;
+  projectId: string;
+  selectedProjectImages: Set<string>;
+  onToggle: (id: string) => void;
+  gap: number;
+}
+
 const ImageGridCell = memo(function ImageGridCell({
   columnIndex,
   rowIndex,
@@ -273,16 +287,11 @@ const ImageGridCell = memo(function ImageGridCell({
   onToggle,
   gap,
 }: {
+  ariaAttributes?: { 'aria-colindex': number; role: 'gridcell' };
   columnIndex: number;
   rowIndex: number;
   style: React.CSSProperties;
-  images: UploadedImage[];
-  cols: number;
-  projectId: string;
-  selectedProjectImages: Set<string>;
-  onToggle: (id: string) => void;
-  gap: number;
-}) {
+} & ImageGridCellUserProps): React.ReactElement | null {
   const idx = rowIndex * cols + columnIndex;
   if (idx >= images.length) return null;
   const img = images[idx];

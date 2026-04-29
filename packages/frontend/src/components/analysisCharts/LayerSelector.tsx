@@ -7,13 +7,7 @@ import {
   Box,
 } from '@chakra-ui/react';
 import { Layers } from 'lucide-react';
-
-export const LAYER_OPTIONS: { value: string; label: string; hint: string }[] = [
-  { value: 'full', label: 'Full', hint: 'Whole-image values (no FMB split)' },
-  { value: 'foreground', label: 'FG', hint: 'Foreground layer (within ~5 m)' },
-  { value: 'middleground', label: 'MG', hint: 'Middleground layer' },
-  { value: 'background', label: 'BG', hint: 'Background layer' },
-];
+import { LAYER_OPTIONS } from './layerOptions';
 
 interface LayerSelectorProps {
   value: string;

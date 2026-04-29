@@ -42,9 +42,13 @@ export function ModeAlert({
     return sessionStorage.getItem(sessionKey) === '1';
   });
 
-  // Reset dismissal when project changes
+  // Reset dismissal when project changes — read sessionStorage and sync into
+  // local state so the alert reappears for projects that haven't been
+  // dismissed yet. Synchronous setState in this effect is intentional; the
+  // alternative (key-based remount) is heavier for the same outcome.
   useEffect(() => {
     if (!sessionKey) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDismissed(sessionStorage.getItem(sessionKey) === '1');
   }, [sessionKey]);
 
