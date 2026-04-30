@@ -1,0 +1,19 @@
+# =============================================================================
+# Override file for building vision-api from a sibling AI_City_View checkout
+# instead of pulling the published image.
+#
+# Usage (requires `../AI_City_View` to exist next to this repo):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#       --profile gpu up -d --build
+#
+# Most users do NOT need this — the default `docker compose --profile gpu up`
+# pulls a prebuilt image from GHCR. Use this only if you are modifying the
+# vision pipeline source and want to rebuild locally.
+# =============================================================================
+
+services:
+  vision-api:
+    build:
+      context: ../AI_City_View
+      dockerfile: Dockerfile

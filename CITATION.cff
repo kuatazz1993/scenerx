@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+title: "SceneRx: An AI-Augmented Pipeline for Urban Greenspace Performance Diagnosis"
+message: "If you use this software, please cite the accompanying paper (in preparation)."
+type: software
+authors:
+  # TODO: replace placeholder with verified author list before public release.
+  - family-names: "Lan"
+    given-names: "Junkai"
+license: MIT
+repository-code: "https://github.com/ZhenGtai123/scenerx"
+url: "https://github.com/ZhenGtai123/scenerx"
+preferred-citation:
+  type: article
+  title: "SceneRx: An AI-Augmented Pipeline for Urban Greenspace Performance Diagnosis"
+  authors:
+    - family-names: "Lan"
+      given-names: "Junkai"
+  year: 2026
+  notes: "Paper in preparation."
+references:
+  - type: conference-paper
+    title: "OneFormer: One Transformer to Rule Universal Image Segmentation"
+    authors:
+      - family-names: "Jain"
+        given-names: "Jitesh"
+    year: 2023
+    conference:
+      name: "CVPR"
+  - type: article
+    title: "Depth Anything 3: Recovering the Visual Space from Any Views"
+    authors:
+      - family-names: "ByteDance Seed"
+    year: 2025
