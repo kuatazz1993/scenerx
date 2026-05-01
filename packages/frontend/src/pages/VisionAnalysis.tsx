@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
-import { useSearchParams, useParams, Link } from 'react-router-dom';
+import { useSearchParams, useParams, Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Box,
@@ -34,9 +34,16 @@ import {
   ListItem,
   Wrap,
   WrapItem,
+  AlertDialog,
+  AlertDialogBody,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogContent,
+  AlertDialogOverlay,
+  CloseButton,
 } from '@chakra-ui/react';
 import { Grid as VirtualGrid } from 'react-window';
-import { ScanSearch, Download, Eye, Archive, Lightbulb, Check as CheckIcon } from 'lucide-react';
+import { ScanSearch, Download, Eye, Archive, Lightbulb } from 'lucide-react';
 import JSZip from 'jszip';
 import { useSemanticConfig, useProject, useRecommendIndicators, useCalculators } from '../hooks/useApi';
 import api from '../api';
@@ -239,7 +246,10 @@ function ImageSelectionGrid({
           rowHeight={ROW_H}
           style={{ height: gridHeight, width: containerWidth, overflowX: 'hidden' }}
           overscanCount={3}
-          cellComponent={ImageGridCell}
+          // react-window v2's strict cellComponent / cellProps typing rejects our
+          // memo-wrapped renderer + user-prop bag even though the runtime contract
+          // matches. Cast through `unknown` to keep the typecheck clean.
+          cellComponent={ImageGridCell as unknown as Parameters<typeof VirtualGrid>[0]['cellComponent']}
           cellProps={{
             images,
             cols: COLS,
@@ -247,14 +257,25 @@ function ImageSelectionGrid({
             selectedProjectImages,
             onToggle,
             gap: GAP,
-          }}
+          } as unknown as Parameters<typeof VirtualGrid>[0]['cellProps']}
         />
       )}
     </Box>
   );
 }
 
-/** Cell renderer for the virtualized image-selection grid. */
+/** Cell renderer for the virtualized image-selection grid. react-window v2
+ * injects {ariaAttributes, columnIndex, rowIndex, style} alongside the
+ * user-supplied cellProps. */
+interface ImageGridCellUserProps {
+  images: UploadedImage[];
+  cols: number;
+  projectId: string;
+  selectedProjectImages: Set<string>;
+  onToggle: (id: string) => void;
+  gap: number;
+}
+
 const ImageGridCell = memo(function ImageGridCell({
   columnIndex,
   rowIndex,
@@ -266,16 +287,11 @@ const ImageGridCell = memo(function ImageGridCell({
   onToggle,
   gap,
 }: {
+  ariaAttributes?: { 'aria-colindex': number; role: 'gridcell' };
   columnIndex: number;
   rowIndex: number;
   style: React.CSSProperties;
-  images: UploadedImage[];
-  cols: number;
-  projectId: string;
-  selectedProjectImages: Set<string>;
-  onToggle: (id: string) => void;
-  gap: number;
-}) {
+} & ImageGridCellUserProps): React.ReactElement | null {
   const idx = rowIndex * cols + columnIndex;
   if (idx >= images.length) return null;
   const img = images[idx];
@@ -388,10 +404,11 @@ function VisionAnalysis() {
   const projectId = routeProjectId || searchParams.get('project');
 
   const { data: semanticConfig, isLoading: configLoading } = useSemanticConfig();
-  const { data: project, isLoading: projectLoading, isFetching: projectFetching } = useProject(projectId || '');
+  const { data: project, isLoading: projectLoading } = useProject(projectId || '');
   const { data: calculators } = useCalculators();
   const toast = useAppToast();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   // Set of calculator IDs for quick lookup — recommendations without a calculator cannot be computed
   const calculatorIds = useMemo(
@@ -811,6 +828,52 @@ function VisionAnalysis() {
       ready: withSemantic.length > 0,
     };
   }, [project]);
+
+  // Readiness is enforced at the moment the user clicks Next, not as a permanent
+  // panel — common pre-analysis state (semanticCount === 0) is a normal start
+  // condition, not an error worth a red banner. Hard blockers render inline
+  // above the buttons; soft warnings (partial coverage) surface in a confirm
+  // dialog so the user can opt to proceed.
+  const [proceedBlocker, setProceedBlocker] = useState<'no-zones' | 'no-masks' | null>(null);
+  const [proceedSoft, setProceedSoft] = useState<{
+    semanticDone: number;
+    semanticTotal: number;
+    fmbDone: number;
+    fmbTotal: number;
+  } | null>(null);
+  const proceedCancelRef = useRef<HTMLButtonElement>(null);
+
+  const navigateToAnalysis = useCallback(() => {
+    if (routeProjectId) navigate(`/projects/${routeProjectId}/analysis`);
+  }, [navigate, routeProjectId]);
+
+  const handleNextClick = useCallback(() => {
+    setProceedBlocker(null);
+    if (!readiness) return;
+
+    if (readiness.assignedCount === 0) {
+      setProceedBlocker('no-zones');
+      return;
+    }
+    if (readiness.semanticCount === 0) {
+      setProceedBlocker('no-masks');
+      return;
+    }
+
+    const semanticIncomplete = readiness.semanticCount < readiness.assignedCount;
+    const fmbIncomplete = readiness.fmbCount < readiness.semanticCount;
+    if (semanticIncomplete || fmbIncomplete) {
+      setProceedSoft({
+        semanticDone: readiness.semanticCount,
+        semanticTotal: readiness.assignedCount,
+        fmbDone: readiness.fmbCount,
+        fmbTotal: readiness.semanticCount,
+      });
+      return;
+    }
+
+    navigateToAnalysis();
+  }, [readiness, navigateToAnalysis]);
 
   return (
     <PageShell isLoading={!!isPageLoading} loadingText="Loading...">
@@ -1328,54 +1391,102 @@ function VisionAnalysis() {
         </VStack>
       </SimpleGrid>
 
-      {/* Readiness Check — suppressed while React Query is refetching, otherwise
-          we'd render stale-cache-based alerts (e.g. "no zones assigned" right after
-          the user just assigned zones on the previous page) until the refetch lands. */}
-      {readiness && routeProjectId && !projectFetching && (
-        <Box mt={6}>
-          {readiness.assignedCount === 0 && (
-            <Alert status="warning" mb={3} borderRadius="md">
-              <AlertIcon />
-              No images assigned to zones. Go to Images step to assign images to zones before analysis.
-            </Alert>
-          )}
-          {readiness.assignedCount > 0 && readiness.semanticCount === 0 && (
-            <Alert status="error" mb={3} borderRadius="md">
-              <AlertIcon />
-              None of the zone-assigned images have been analyzed. Run Vision Analysis above before proceeding.
-            </Alert>
-          )}
-          {readiness.semanticCount > 0 && readiness.semanticCount < readiness.assignedCount && (
-            <Alert status="warning" mb={3} borderRadius="md">
-              <AlertIcon />
-              Only {readiness.semanticCount} of {readiness.assignedCount} zone-assigned images have been analyzed. Unanalyzed images will be skipped in the pipeline.
-            </Alert>
-          )}
-          {readiness.semanticCount > 0 && readiness.fmbCount < readiness.semanticCount && (
-            <Alert status="info" mb={3} borderRadius="md">
-              <AlertIcon />
-              {readiness.fmbCount} of {readiness.semanticCount} analyzed images have FMB layer masks. Images without FMB masks will only have full-layer analysis.
-            </Alert>
-          )}
-        </Box>
+      {/* Inline blocker — shown only when user clicks Next while a hard
+          precondition is unmet. Cleared when the user takes any action. */}
+      {proceedBlocker === 'no-zones' && routeProjectId && (
+        <Alert status="warning" mt={6} borderRadius="md">
+          <AlertIcon />
+          <Box flex={1}>
+            <Text fontWeight="bold">No images assigned to zones</Text>
+            <Text fontSize="sm">
+              Go back to the Images step and assign images to zones before continuing.
+            </Text>
+          </Box>
+          <Button
+            as={Link}
+            to={`/projects/${routeProjectId}`}
+            size="sm"
+            colorScheme="orange"
+            variant="outline"
+            mr={2}
+          >
+            Back: Images
+          </Button>
+          <CloseButton onClick={() => setProceedBlocker(null)} />
+        </Alert>
+      )}
+      {proceedBlocker === 'no-masks' && (
+        <Alert status="warning" mt={6} borderRadius="md">
+          <AlertIcon />
+          <Box flex={1}>
+            <Text fontWeight="bold">No images analyzed yet</Text>
+            <Text fontSize="sm">
+              Run Vision Analysis above on at least one zone-assigned image before continuing.
+            </Text>
+          </Box>
+          <CloseButton onClick={() => setProceedBlocker(null)} />
+        </Alert>
       )}
 
       {/* Navigation buttons */}
       {routeProjectId && (
-        <HStack justify="space-between" mt={readiness && routeProjectId ? 3 : 6}>
+        <HStack justify="space-between" mt={proceedBlocker ? 3 : 6}>
           <Button as={Link} to={`/projects/${routeProjectId}`} variant="outline">
             Back: Images
           </Button>
-          <Button
-            as={Link}
-            to={`/projects/${routeProjectId}/analysis`}
-            colorScheme="blue"
-            isDisabled={!readiness?.ready}
-          >
+          <Button colorScheme="blue" onClick={handleNextClick}>
             Next: Analysis
           </Button>
         </HStack>
       )}
+
+      {/* Soft-warning confirm — partial semantic coverage and/or partial FMB
+          coverage. Both are non-blocking; pipeline will skip unprocessed images. */}
+      <AlertDialog
+        isOpen={proceedSoft !== null}
+        leastDestructiveRef={proceedCancelRef}
+        onClose={() => setProceedSoft(null)}
+        isCentered
+      >
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">
+              Continue with partial coverage?
+            </AlertDialogHeader>
+            <AlertDialogBody>
+              {proceedSoft && proceedSoft.semanticDone < proceedSoft.semanticTotal && (
+                <Text fontSize="sm" mb={2}>
+                  <strong>{proceedSoft.semanticDone}</strong> of{' '}
+                  <strong>{proceedSoft.semanticTotal}</strong> zone-assigned images are
+                  analyzed. The remaining {proceedSoft.semanticTotal - proceedSoft.semanticDone}{' '}
+                  will be skipped in the pipeline.
+                </Text>
+              )}
+              {proceedSoft && proceedSoft.fmbDone < proceedSoft.fmbTotal && (
+                <Text fontSize="sm" color="gray.600">
+                  {proceedSoft.fmbDone} of {proceedSoft.fmbTotal} analyzed images have FMB
+                  layer masks. Images without FMB masks will only have full-layer analysis.
+                </Text>
+              )}
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={proceedCancelRef} onClick={() => setProceedSoft(null)}>
+                Cancel
+              </Button>
+              <Button
+                colorScheme="blue"
+                ml={3}
+                onClick={() => {
+                  setProceedSoft(null);
+                  navigateToAnalysis();
+                }}
+              >
+                Continue anyway
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
     </PageShell>
   );
 }

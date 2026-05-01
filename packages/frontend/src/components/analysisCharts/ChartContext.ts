@@ -45,7 +45,11 @@ export interface ChartContext {
   globalIndicatorStats: GlobalIndicatorStats[];
   dataQuality: DataQualityRow[];
   indicatorDefs: Record<string, IndicatorDefinitionInput>;
-  analysisMode: 'multi_zone' | 'single_zone';
+  analysisMode: 'zone_level' | 'image_level';
+  zoneSource: 'user' | 'cluster' | null;
+
+  // Reading preferences (5.10.4 / 5.10.8)
+  colorblindMode: boolean;
 }
 
 export const LAYERS = ['full', 'foreground', 'middleground', 'background'];
@@ -91,6 +95,7 @@ interface BuildArgs {
   clusteringResult: ClusteringResponse | null;
   currentProject: Project | null;
   selectedLayer: string;
+  colorblindMode?: boolean;
 }
 
 /**
@@ -98,7 +103,14 @@ interface BuildArgs {
  * to recompute on every relevant state change.
  */
 export function buildChartContext(args: BuildArgs): ChartContext {
-  const { zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer } = args;
+  const {
+    zoneAnalysisResult,
+    pipelineResult,
+    clusteringResult,
+    currentProject,
+    selectedLayer,
+    colorblindMode = false,
+  } = args;
 
   const sortedDiagnostics = zoneAnalysisResult
     ? [...zoneAnalysisResult.zone_diagnostics].sort((a, b) => b.mean_abs_z - a.mean_abs_z)
@@ -148,7 +160,8 @@ export function buildChartContext(args: BuildArgs): ChartContext {
   const globalIndicatorStats = zoneAnalysisResult?.global_indicator_stats ?? [];
   const dataQuality = zoneAnalysisResult?.data_quality ?? [];
   const indicatorDefs = zoneAnalysisResult?.indicator_definitions ?? {};
-  const analysisMode = zoneAnalysisResult?.analysis_mode ?? 'multi_zone';
+  const analysisMode = zoneAnalysisResult?.analysis_mode ?? 'zone_level';
+  const zoneSource = zoneAnalysisResult?.zone_source ?? null;
 
   return {
     zoneAnalysisResult,
@@ -167,5 +180,7 @@ export function buildChartContext(args: BuildArgs): ChartContext {
     dataQuality,
     indicatorDefs,
     analysisMode,
+    zoneSource,
+    colorblindMode,
   };
 }

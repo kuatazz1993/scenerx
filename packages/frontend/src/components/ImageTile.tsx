@@ -11,33 +11,6 @@ export function thumbnailUrl(projectId: string, imageId: string, size = 160): st
 }
 
 /* ------------------------------------------------------------------ */
-/*  Lazy-loaded background image hook                                  */
-/* ------------------------------------------------------------------ */
-
-function useLazyImage(src: string): boolean {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisible(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin: '200px' },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
-  return visible;
-}
-
-/* ------------------------------------------------------------------ */
 /*  Zone image tile (hover buttons: unassign + delete)                 */
 /* ------------------------------------------------------------------ */
 

@@ -167,6 +167,7 @@ class DesignEngine:
                     iom_queries, diagnosis_data = await self._llm_diagnosis(
                         diag, zone_analysis, request.project_context, allowed,
                         project_indicators,
+                        analysis_narratives=request.analysis_narratives,
                     )
                 else:
                     iom_queries = self._rule_based_diagnosis(diag, zone_analysis, allowed)
@@ -226,6 +227,44 @@ class DesignEngine:
         )
 
     # ------------------------------------------------------------------
+    # 6.A — Stage 2 caption block
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_narrative_block(
+        zone_id: str,
+        analysis_narratives: dict[str, dict[str, str]],
+    ) -> str:
+        """Render Stage 2 chart captions for a single zone.
+
+        analysis_narratives shape: {zone_id: {chart_id: caption_text}}.
+        zone_id "_global" carries captions for charts that are not per-zone
+        (correlation, distribution, etc.). Both per-zone and global captions
+        are emitted when present.
+        """
+        if not analysis_narratives:
+            return "(no Stage 2 captions available — user has not generated them yet)"
+
+        sections: list[str] = []
+        zone_captions = analysis_narratives.get(zone_id) or {}
+        if zone_captions:
+            sections.append(f"### Captions for {zone_id}")
+            for chart_id, caption in zone_captions.items():
+                if caption and caption.strip():
+                    sections.append(f"- **{chart_id}**: {caption.strip()}")
+
+        global_captions = analysis_narratives.get("_global") or {}
+        if global_captions:
+            sections.append("### Project-wide chart captions")
+            for chart_id, caption in global_captions.items():
+                if caption and caption.strip():
+                    sections.append(f"- **{chart_id}**: {caption.strip()}")
+
+        if not sections:
+            return "(no Stage 2 captions available for this zone)"
+        return "\n".join(sections)
+
+    # ------------------------------------------------------------------
     # v6.0: Build project-level indicator overview
     # ------------------------------------------------------------------
 
@@ -274,6 +313,7 @@ class DesignEngine:
         project_context: ProjectContext,
         allowed: Optional[set[str]],
         project_indicators: dict[str, dict],
+        analysis_narratives: Optional[dict[str, dict[str, str]]] = None,
     ) -> tuple[list[dict], dict]:
         """Agent A diagnosis. Returns (iom_queries, full_diagnosis_data)."""
         ind_defs = zone_analysis.indicator_definitions
@@ -364,6 +404,27 @@ class DesignEngine:
                     f"layers=[{layer_info}], target_direction={pdata['target_direction']}")
         supplementary_indicators = '\n'.join(supp_lines) if supp_lines else '(none — all indicators present)'
 
+        # 6.A — Stage 2 chart caption block (analysis_narratives)
+        narrative_block = self._build_narrative_block(
+            diag.zone_id, analysis_narratives or {}
+        )
+
+        # mode-aware quality preface
+        analysis_mode = (zone_analysis.analysis_mode or "zone_level").lower()
+        if analysis_mode == "image_level":
+            mode_preface = (
+                "## Statistical Mode — Image-Level (single-zone fallback)\n"
+                "This project has only one zone (or sub-zone clustering was used).\n"
+                "Cross-zone z-scores are computed against the image-level distribution\n"
+                "(per GPS point). Treat phrases like 'compared to other zones' as\n"
+                "comparing each image to the project-wide image distribution.\n"
+            )
+        else:
+            mode_preface = (
+                f"## Statistical Mode — Zone-Level ({len(cross_zone)} zones)\n"
+                "Z-scores are computed across zones; cross-zone comparisons are valid.\n"
+            )
+
         prompt = f"""You are an expert landscape analyst. IMPORTANT: Respond ONLY in English.
 Analyze this spatial unit's indicator data and generate IOM queries
 (which indicators to change, in what direction) for the IOM matching engine.
@@ -397,6 +458,14 @@ relevant to the design brief. Pay special attention to these.
 - Mean |Z-score|: {diag.mean_abs_z} (descriptive deviation)
 - Rank: {relative_position}
 - Points: {diag.point_count}
+
+{mode_preface}
+## Stage 2 Chart Captions (LLM-generated interpretations from the Analysis tab)
+These are the per-chart "What this means" summaries the user has already seen.
+Use them as reference perspectives. If a caption conflicts with the raw data
+below, TRUST THE RAW DATA.
+
+{narrative_block}
 
 ## Indicator Values (full layer — descriptive only)
 {indicator_table}

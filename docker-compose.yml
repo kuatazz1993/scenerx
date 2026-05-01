@@ -1,25 +1,79 @@
-version: '3.8'
+# =============================================================================
+# SceneRx — production compose file
+# -----------------------------------------------------------------------------
+# Default behaviour:
+#   docker compose up -d
+#       Starts: postgres, redis, backend, celery-worker, frontend
+#       Backend talks to whatever VISION_API_URL points to in .env
+#       (a remote Hugging Face Space, a Colab tunnel, or a self-hosted
+#       endpoint — see README §B "Without a local GPU").
+#
+#   docker compose --profile gpu up -d
+#       Adds: vision-api  (pulled from GHCR — requires NVIDIA GPU + toolkit)
+#
+# To build vision-api from a sibling AI_City_View checkout instead of pulling:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#       --profile gpu up -d --build
+# =============================================================================
 
 services:
-  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  # Vision API — segmentation + depth (GPU-only).
+  # Opt-in via `--profile gpu`. The default image is published from this
+  # project's CI; pin a specific tag with VISION_IMAGE_TAG in .env for
+  # reproducibility.
+  # ---------------------------------------------------------------------------
+  vision-api:
+    image: ${SCENERX_VISION_IMAGE:-ghcr.io/zhengtai123/scenerx-vision}:${VISION_IMAGE_TAG:-latest}
+    container_name: scenerx-vision-api
+    profiles: ["gpu"]
+    environment:
+      - VISION_DEPTH_MODEL=${VISION_DEPTH_MODEL:-DA3METRIC-LARGE}
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - vision_outputs:/app/outputs
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: scenerx-postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: scenerx
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-scenerx}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Redis for Celery
+  # ---------------------------------------------------------------------------
+  # Redis (Celery broker + result backend)
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: scenerx-redis
@@ -32,20 +86,28 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # FastAPI Backend
+  # ---------------------------------------------------------------------------
+  # FastAPI backend
+  # ---------------------------------------------------------------------------
   backend:
     build:
       context: ./packages/backend
       dockerfile: Dockerfile
+    image: scenerx-backend:${SCENERX_VERSION:-dev}
     container_name: scenerx-backend
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/scenerx
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-scenerx}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - VISION_API_URL=${VISION_API_URL:-http://host.docker.internal:8000}
+      - VISION_API_URL=${VISION_API_URL:-http://vision-api:8000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:-CHANGE_ME_RUN_openssl_rand_hex_32}
       - DEBUG=false
     volumes:
       - ./packages/backend/data:/app/data
@@ -63,40 +125,50 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
 
-  # Celery Worker
+  # ---------------------------------------------------------------------------
+  # Celery worker
+  # ---------------------------------------------------------------------------
   celery-worker:
-    build:
-      context: ./packages/backend
-      dockerfile: Dockerfile
+    image: scenerx-backend:${SCENERX_VERSION:-dev}
     container_name: scenerx-celery-worker
     command: celery -A app.core.celery_app worker --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/scenerx
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-scenerx}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - VISION_API_URL=${VISION_API_URL:-http://host.docker.internal:8000}
+      - VISION_API_URL=${VISION_API_URL:-http://vision-api:8000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     volumes:
       - ./packages/backend/data:/app/data
       - ./packages/backend/outputs:/app/outputs
       - ./packages/backend/temp:/app/temp
     depends_on:
-      - redis
-      - postgres
       - backend
+    restart: unless-stopped
 
-  # React Frontend
+  # ---------------------------------------------------------------------------
+  # React frontend (nginx static)
+  # ---------------------------------------------------------------------------
   frontend:
     build:
       context: ./packages/frontend
       dockerfile: Dockerfile
+    image: scenerx-frontend:${SCENERX_VERSION:-dev}
     container_name: scenerx-frontend
     ports:
       - "3000:80"
     depends_on:
       - backend
+    restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
+  hf_cache:
+  vision_outputs:

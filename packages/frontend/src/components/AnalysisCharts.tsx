@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Box, Text, SimpleGrid } from '@chakra-ui/react';
+import { Box, Text, SimpleGrid, HStack } from '@chakra-ui/react';
 import {
   RadarChart,
   PolarGrid,
@@ -21,6 +21,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import type { EnrichedZoneStat, ZoneDiagnostic, ArchetypeProfile, UploadedImage, ImageRecord, GlobalIndicatorStats, DataQualityRow, IndicatorDefinitionInput } from '../types';
+import { divergingColor, directionalColor, magnitudeColor } from '../utils/palette';
 
 // Shared color palette for zones
 const ZONE_COLORS = [
@@ -216,12 +217,12 @@ export function ZonePriorityChart({ diagnostics }: ZonePriorityChartProps) {
           width={120}
         />
         <Tooltip
-          formatter={(value: number, name: string) => [
-            value,
-            name === 'mean_abs_z' ? 'Mean |Z-score|' : 'Points',
+          formatter={(value, name) => [
+            (typeof value === 'number' ? value : 0) as number,
+            name === 'mean_abs_z' ? 'Mean |z|' : 'Points',
           ]}
         />
-        <Bar dataKey="mean_abs_z" name="Mean |Z-score|" barSize={20}>
+        <Bar dataKey="mean_abs_z" name="Mean |z|" barSize={20}>
           {data.map((entry, i) => (
             <Cell key={i} fill={deviationBarColor(entry.mean_abs_z)} />
           ))}
@@ -237,9 +238,14 @@ interface CorrelationHeatmapProps {
   corr: Record<string, Record<string, number>>;
   pval?: Record<string, Record<string, number>>;
   indicators: string[];
+  /** 5.10.8 — switch to Cividis when set, default red-blue otherwise. */
+  colorblindMode?: boolean;
 }
 
-function corrColor(val: number): string {
+function corrColor(val: number, colorblindMode = false): string {
+  if (colorblindMode) {
+    return divergingColor(val, true);
+  }
   const intensity = Math.min(Math.abs(val), 1);
   const alpha = 0.15 + intensity * 0.85;
   if (val > 0) return `rgba(49, 130, 206, ${alpha})`;   // blue
@@ -255,7 +261,7 @@ function significanceStars(p: number | undefined): string {
   return '';
 }
 
-export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatmapProps) {
+export function CorrelationHeatmap({ corr, pval, indicators, colorblindMode }: CorrelationHeatmapProps) {
   const n = indicators.length;
   const cellSize = Math.max(36, Math.min(48, 400 / Math.max(n, 1)));
   const labelWidth = 100;
@@ -306,11 +312,11 @@ export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatma
                     width={cellSize - 2}
                     height={cellSize - 2}
                     rx={3}
-                    fill={val != null ? corrColor(val) : '#EDF2F7'}
+                    fill={val != null ? corrColor(val, colorblindMode) : '#EDF2F7'}
                     stroke="#E2E8F0"
                     strokeWidth={0.5}
                   >
-                    <title>{`${row} × ${col}: ${val != null ? val.toFixed(3) : '-'}${stars ? ` (p${stars})` : ''}`}</title>
+                    <title>{`${row} × ${col}: ${val != null ? val.toFixed(3) : '—'}${stars ? ` (p${stars})` : ''}`}</title>
                   </rect>
                   <text
                     x={labelWidth + ci * cellSize + (cellSize - 2) / 2}
@@ -320,7 +326,7 @@ export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatma
                     fill={val != null && Math.abs(val) > 0.6 ? '#fff' : '#2D3748'}
                     pointerEvents="none"
                   >
-                    {val != null ? val.toFixed(2) : '-'}
+                    {val != null ? val.toFixed(2) : '—'}
                   </text>
                   {stars && (
                     <text
@@ -342,11 +348,11 @@ export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatma
 
         {/* Color legend */}
         <g transform={`translate(${labelWidth}, ${svgHeight - 16})`}>
-          <rect width={12} height={12} fill="rgba(229, 62, 62, 0.85)" rx={2} />
+          <rect width={12} height={12} fill={corrColor(-1, colorblindMode)} rx={2} />
           <text x={16} y={10} fontSize={9} fill="#4A5568">-1</text>
-          <rect x={40} width={12} height={12} fill="rgba(160, 174, 192, 0.2)" rx={2} />
+          <rect x={40} width={12} height={12} fill={corrColor(0, colorblindMode)} rx={2} />
           <text x={56} y={10} fontSize={9} fill="#4A5568">0</text>
-          <rect x={72} width={12} height={12} fill="rgba(49, 130, 206, 0.85)" rx={2} />
+          <rect x={72} width={12} height={12} fill={corrColor(1, colorblindMode)} rx={2} />
           <text x={88} y={10} fontSize={9} fill="#4A5568">+1</text>
         </g>
       </svg>
@@ -356,7 +362,12 @@ export function CorrelationHeatmap({ corr, pval, indicators }: CorrelationHeatma
 
 // ─── Z-Score Heatmap (Zone × Indicator) — v6.0 descriptive ─────────────────
 
-function zScoreCellColor(z: number): string {
+function zScoreCellColor(z: number, colorblindMode = false): string {
+  if (colorblindMode) {
+    // Map z to [-1, 1] (clip at ±2 for legibility), then run through Cividis.
+    const t = Math.max(-1, Math.min(1, z / 2));
+    return divergingColor(t, true);
+  }
   // coolwarm-style: neutral center, blue for negative, red for positive
   const absZ = Math.abs(z);
   if (absZ < 0.25) return '#E2E8F0';     // near zero = gray
@@ -375,9 +386,10 @@ function zScoreCellColor(z: number): string {
 interface PriorityHeatmapProps {
   diagnostics: ZoneDiagnostic[];
   layer?: string;
+  colorblindMode?: boolean;
 }
 
-export function PriorityHeatmap({ diagnostics, layer = 'full' }: PriorityHeatmapProps) {
+export function PriorityHeatmap({ diagnostics, layer = 'full', colorblindMode }: PriorityHeatmapProps) {
   const { zones, indicators, grid } = useMemo(() => {
     const zoneList = diagnostics.map(d => d.zone_name);
     const indSet = new Set<string>();
@@ -450,7 +462,7 @@ export function PriorityHeatmap({ diagnostics, layer = 'full' }: PriorityHeatmap
                     width={cellW - 2}
                     height={cellH - 2}
                     rx={3}
-                    fill={zScoreCellColor(zs)}
+                    fill={zScoreCellColor(zs, colorblindMode)}
                     opacity={0.85}
                   >
                     <title>{`${zone} x ${ind}: z=${zs.toFixed(2)}`}</title>
@@ -566,7 +578,7 @@ export function DescriptiveStatsChart({ stats, layer }: DescriptiveStatsChartPro
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis type="number" tick={{ fontSize: 10 }} />
         <YAxis type="category" dataKey="indicator" tick={{ fontSize: 9 }} width={100} />
-        <Tooltip formatter={(v: number, name: string) => [v.toFixed(3), name]} />
+        <Tooltip formatter={(v, name) => [typeof v === 'number' ? v.toFixed(3) : '—', name ?? '']} />
         <Legend wrapperStyle={{ fontSize: 11 }} />
         <Bar dataKey="mean" fill="#3182CE" name="Mean" barSize={14}>
           <ErrorBar dataKey="std" direction="x" stroke="#2D3748" strokeWidth={1} />
@@ -749,6 +761,10 @@ interface IndicatorDeepDiveProps {
   indicatorName?: string;
   unit?: string;
   targetDirection?: string;
+  /** When `image_level`, fall back to image-level Std/CV from globalStats. */
+  analysisMode?: 'zone_level' | 'image_level';
+  /** Per-indicator image-level stats (n=images, has by_layer.{N,Mean,Std}). */
+  globalStats?: GlobalIndicatorStats;
 }
 
 const DD_LAYERS = ['full', 'foreground', 'middleground', 'background'] as const;
@@ -774,7 +790,7 @@ function viridisColor(t: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
-export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, targetDirection }: IndicatorDeepDiveProps) {
+export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, targetDirection, analysisMode, globalStats }: IndicatorDeepDiveProps) {
   const derived = useMemo(() => {
     const indStats = stats.filter(s => s.indicator_id === indicatorId);
     if (indStats.length === 0) return null;
@@ -797,23 +813,40 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
     const maxV = fullEntries.length > 0 ? Math.max(...fullEntries.map(e => e.value)) : 0;
     const minV = fullEntries.length > 0 ? Math.min(...fullEntries.map(e => e.value)) : 0;
 
-    // Layer statistics (aggregated across zones)
+    // Layer statistics. With < 2 zones, the cross-zone std/cv collapse to 0
+    // mathematically — fall back to image-level Std/CV (n = n_images) which
+    // captures the meaningful within-zone dispersion.
+    const useImageLevel = analysisMode === 'image_level' || zoneList.length < 2;
     const layerStats = DD_LAYERS.map(layer => {
+      if (useImageLevel && globalStats) {
+        const layerEntry = globalStats.by_layer?.[layer];
+        if (layerEntry?.N != null && layerEntry.N > 0) {
+          const mean = layerEntry.Mean ?? 0;
+          const std = layerEntry.Std ?? 0;
+          const cv = layer === 'full' && globalStats.cv_full != null
+            ? globalStats.cv_full
+            : (mean !== 0 ? (std / Math.abs(mean)) * 100 : 0);
+          return { layer, n: layerEntry.N, mean, std, cv };
+        }
+      }
       const vals = zoneList.map(z => getVal(z.id, layer)).filter((v): v is number => v != null);
       if (vals.length === 0) return { layer, n: 0, mean: 0, std: 0, cv: 0 };
       const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+      // ddof=1 (sample std) so a single value yields NaN, not 0.
+      if (vals.length < 2) return { layer, n: vals.length, mean, std: NaN, cv: NaN };
+      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (vals.length - 1);
       const std = Math.sqrt(variance);
       const cv = mean !== 0 ? (std / Math.abs(mean)) * 100 : 0;
       return { layer, n: vals.length, mean, std, cv };
     });
 
-    return { fullEntries, maxV, minV, layerStats };
-  }, [stats, indicatorId]);
+    return { fullEntries, maxV, minV, layerStats, useImageLevel };
+  }, [stats, indicatorId, analysisMode, globalStats]);
 
   if (!derived) return null;
-  const { fullEntries, maxV, minV, layerStats } = derived;
+  const { fullEntries, maxV, minV, layerStats, useImageLevel } = derived;
   const range = maxV - minV || 1;
+  const fmt = (v: number, digits: number) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
 
   return (
     <Box>
@@ -865,7 +898,14 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
 
         {/* Layer Statistics table */}
         <Box>
-          <Text fontSize="xs" fontWeight="bold" mb={1}>Layer Statistics</Text>
+          <HStack justify="space-between" mb={1}>
+            <Text fontSize="xs" fontWeight="bold">Layer Statistics</Text>
+            {useImageLevel && (
+              <Text fontSize="2xs" color="gray.500">
+                (image-level, n = {layerStats.find(l => l.layer === 'full')?.n ?? '?'})
+              </Text>
+            )}
+          </HStack>
           <Box as="table" fontSize="10px" width="100%" sx={{ borderCollapse: 'collapse' }}>
             <Box as="thead">
               <Box as="tr" bg="gray.50" fontWeight="bold">
@@ -883,9 +923,9 @@ export function IndicatorDeepDive({ stats, indicatorId, indicatorName, unit, tar
                     {DD_LAYER_LABELS[ls.layer]}
                   </Box>
                   <Box as="td" px={2} py={1} textAlign="right">{ls.n}</Box>
-                  <Box as="td" px={2} py={1} textAlign="right">{ls.mean.toFixed(3)}</Box>
-                  <Box as="td" px={2} py={1} textAlign="right">{ls.std.toFixed(3)}</Box>
-                  <Box as="td" px={2} py={1} textAlign="right">{ls.cv.toFixed(1)}</Box>
+                  <Box as="td" px={2} py={1} textAlign="right">{fmt(ls.mean, 3)}</Box>
+                  <Box as="td" px={2} py={1} textAlign="right">{fmt(ls.std, 3)}</Box>
+                  <Box as="td" px={2} py={1} textAlign="right">{fmt(ls.cv, 1)}</Box>
                 </Box>
               ))}
             </Box>
@@ -1072,87 +1112,167 @@ const LAYER_SCATTER_COLORS: Record<string, string> = {
 };
 
 export function SpatialScatterByLayer({ gpsImages, indicatorId }: SpatialScatterByLayerProps) {
-  // Collect points across all layers into one dataset
-  const allPoints = useMemo(() => {
-    const pts: { lat: number; lng: number; value: number; label: string; layerKey: string; layerLabel: string }[] = [];
+  // Per-layer point sets. With identical (lat,lng) across the 4 layers, an
+  // overlaid single-canvas rendering hides every layer except the last drawn —
+  // small multiples (one canvas per layer) removes the occlusion entirely.
+  const layered = useMemo(() => {
+    type Pt = { lat: number; lng: number; value: number; label: string };
+    const out: Record<string, Pt[]> = { full: [], foreground: [], middleground: [], background: [] };
     for (const l of LAYER_DEFS) {
       const key = l.suffix ? `${indicatorId}${l.suffix}` : indicatorId;
       for (const img of gpsImages) {
         const v = img.metrics_results[key];
         if (v != null && img.latitude != null && img.longitude != null) {
-          pts.push({
-            lat: img.latitude,
-            lng: img.longitude,
-            value: v,
-            label: `${img.zone_id || img.filename} [${l.label}]`,
-            layerKey: l.key,
-            layerLabel: l.label,
+          out[l.key].push({
+            lat: img.latitude, lng: img.longitude, value: v,
+            label: `${img.zone_id || img.filename}`,
           });
         }
       }
     }
-    return pts;
+    return out;
   }, [gpsImages, indicatorId]);
 
-  if (allPoints.length === 0) return null;
+  // Shared lat/lng extent so all 4 panels align.
+  const allPts = useMemo(
+    () => Object.values(layered).flat(),
+    [layered],
+  );
+  if (allPts.length === 0) return null;
 
-  const svgW = 500;
-  const svgH = 360;
-  const margin = { l: 56, r: 16, t: 20, b: 44 };
-  const plotW = svgW - margin.l - margin.r;
-  const plotH = svgH - margin.t - margin.b;
-
-  const lngs = allPoints.map(p => p.lng);
-  const lats = allPoints.map(p => p.lat);
+  const lngs = allPts.map(p => p.lng);
+  const lats = allPts.map(p => p.lat);
   const lngMin = Math.min(...lngs), lngMax = Math.max(...lngs);
   const latMin = Math.min(...lats), latMax = Math.max(...lats);
   const lngRange = lngMax - lngMin || 0.001;
   const latRange = latMax - latMin || 0.001;
 
+  const svgW = 280, svgH = 220;
+  const margin = { l: 38, r: 10, t: 22, b: 28 };
+  const plotW = svgW - margin.l - margin.r;
+  const plotH = svgH - margin.t - margin.b;
   const toX = (lng: number) => margin.l + ((lng - lngMin) / lngRange) * plotW;
   const toY = (lat: number) => margin.t + plotH - ((lat - latMin) / latRange) * plotH;
-
-  // Count per layer for legend
-  const layerCounts: Record<string, number> = {};
-  for (const p of allPoints) layerCounts[p.layerKey] = (layerCounts[p.layerKey] || 0) + 1;
-
-  // Render order: full first (bottom), then BG, MG, FG on top
-  const renderOrder = ['full', 'background', 'middleground', 'foreground'];
 
   return (
     <Box>
       <Text fontSize="sm" fontWeight="bold" mb={2}>{indicatorId}</Text>
+      <SimpleGrid columns={{ base: 1, sm: 2, lg: 4 }} spacing={2}>
+        {LAYER_DEFS.map(l => {
+          const pts = layered[l.key];
+          const color = LAYER_SCATTER_COLORS[l.key] || '#A0AEC0';
+          return (
+            <Box key={l.key} borderWidth={1} borderColor="gray.200" borderRadius="md" p={1}>
+              <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
+                <text x={svgW / 2} y={14} textAnchor="middle" fontSize={10} fontWeight="bold" fill={color}>
+                  {l.label} (n={pts.length})
+                </text>
+                <line x1={margin.l} y1={margin.t} x2={margin.l} y2={margin.t + plotH} stroke="#CBD5E0" />
+                <line x1={margin.l} y1={margin.t + plotH} x2={margin.l + plotW} y2={margin.t + plotH} stroke="#CBD5E0" />
+                {pts.map((p, i) => (
+                  <circle key={i} cx={toX(p.lng)} cy={toY(p.lat)} r={3.5}
+                    fill={color} stroke="#fff" strokeWidth={0.5} opacity={0.85}>
+                    <title>{`${p.label}: ${p.value.toFixed(3)}`}</title>
+                  </circle>
+                ))}
+              </svg>
+            </Box>
+          );
+        })}
+      </SimpleGrid>
+    </Box>
+  );
+}
+
+// ─── Per-Indicator Value Spatial Distribution (Issue 4d) ───────────────────
+// A heatmap over GPS points colored by indicator VALUE (not layer, not z).
+// Complements:
+//   • Fig 7 (Layer Coverage): "where does each layer have data?"
+//   • Fig 8 (Z-Deviation):    "where does the indicator deviate from mean?"
+//   • Value Heatmap:          "where is the indicator value high vs. low?"
+// Especially useful for single-zone projects where the z-based views collapse.
+
+interface ValueSpatialMapProps {
+  gpsImages: UploadedImage[];
+  indicatorId: string;
+  /** Which layer's value to display (default 'full'). */
+  layer?: 'full' | 'foreground' | 'middleground' | 'background';
+  /** INCREASE = green-better, DECREASE = red-better, NEUTRAL = blue. */
+  targetDirection?: string;
+  colorblindMode?: boolean;
+}
+
+function gradientForDirection(t: number, dir: string, colorblindMode = false): string {
+  return directionalColor(t, dir, colorblindMode);
+}
+
+export function ValueSpatialMap({
+  gpsImages, indicatorId, layer = 'full', targetDirection = 'NEUTRAL', colorblindMode,
+}: ValueSpatialMapProps) {
+  const points = useMemo(() => {
+    const suffix = LAYER_DEFS.find(l => l.key === layer)?.suffix ?? '';
+    const key = suffix ? `${indicatorId}${suffix}` : indicatorId;
+    const pts: { lat: number; lng: number; value: number; label: string }[] = [];
+    for (const img of gpsImages) {
+      const v = img.metrics_results[key];
+      if (v != null && img.latitude != null && img.longitude != null) {
+        pts.push({ lat: img.latitude, lng: img.longitude, value: v, label: img.filename });
+      }
+    }
+    return pts;
+  }, [gpsImages, indicatorId, layer]);
+
+  if (points.length === 0) return null;
+
+  // Robust value range using p5/p95 to avoid outliers compressing the gradient.
+  const vals = [...points.map(p => p.value)].sort((a, b) => a - b);
+  const p5 = vals[Math.floor(vals.length * 0.05)] ?? vals[0];
+  const p95 = vals[Math.floor(vals.length * 0.95)] ?? vals[vals.length - 1];
+  const valRange = p95 - p5 || 1;
+
+  const svgW = 360, svgH = 260;
+  const margin = { l: 50, r: 16, t: 28, b: 38 };
+  const plotW = svgW - margin.l - margin.r;
+  const plotH = svgH - margin.t - margin.b;
+  const lngs = points.map(p => p.lng), lats = points.map(p => p.lat);
+  const lngMin = Math.min(...lngs), lngMax = Math.max(...lngs);
+  const latMin = Math.min(...lats), latMax = Math.max(...lats);
+  const lngRange = lngMax - lngMin || 0.001;
+  const latRange = latMax - latMin || 0.001;
+  const toX = (lng: number) => margin.l + ((lng - lngMin) / lngRange) * plotW;
+  const toY = (lat: number) => margin.t + plotH - ((lat - latMin) / latRange) * plotH;
+
+  return (
+    <Box>
+      <Text fontSize="sm" fontWeight="bold" mb={1}>{indicatorId}</Text>
+      <Text fontSize="xs" color="gray.500" mb={1}>
+        Color = indicator value ({layer} layer · {targetDirection.toLowerCase()} = better-darker · range p5–p95)
+      </Text>
       <Box overflowX="auto">
         <svg width={svgW} height={svgH} style={{ fontFamily: 'system-ui, sans-serif' }}>
           <line x1={margin.l} y1={margin.t} x2={margin.l} y2={margin.t + plotH} stroke="#CBD5E0" />
           <line x1={margin.l} y1={margin.t + plotH} x2={margin.l + plotW} y2={margin.t + plotH} stroke="#CBD5E0" />
-          <text x={svgW / 2} y={svgH - 5} textAnchor="middle" fontSize={10} fill="#718096">Longitude</text>
-          <text x={12} y={svgH / 2} textAnchor="middle" fontSize={10} fill="#718096" transform={`rotate(-90, 12, ${svgH / 2})`}>Latitude</text>
-          {renderOrder.map(layerKey =>
-            allPoints
-              .filter(p => p.layerKey === layerKey)
-              .map((p, i) => (
-                <circle
-                  key={`${layerKey}-${i}`}
-                  cx={toX(p.lng)}
-                  cy={toY(p.lat)}
-                  r={5.5}
-                  fill={LAYER_SCATTER_COLORS[layerKey] || '#A0AEC0'}
-                  stroke="#fff"
-                  strokeWidth={0.8}
-                  opacity={0.8}
-                >
-                  <title>{`${p.label}: ${p.value.toFixed(3)}`}</title>
-                </circle>
-              ))
-          )}
-          {/* Layer legend */}
-          {LAYER_DEFS.filter(l => layerCounts[l.key]).map((l, i) => (
-            <g key={l.key} transform={`translate(${margin.l + 8}, ${margin.t + 8 + i * 18})`}>
-              <circle cx={6} cy={0} r={5} fill={LAYER_SCATTER_COLORS[l.key]} stroke="#fff" strokeWidth={0.8} opacity={0.8} />
-              <text x={16} y={4} fontSize={9} fill="#4A5568">{l.label} (n={layerCounts[l.key]})</text>
-            </g>
-          ))}
+          {points.map((p, i) => {
+            const t = (p.value - p5) / valRange;
+            return (
+              <circle key={i} cx={toX(p.lng)} cy={toY(p.lat)} r={4.5}
+                fill={gradientForDirection(t, targetDirection, colorblindMode)} stroke="#fff" strokeWidth={0.6} opacity={0.9}>
+                <title>{`${p.label}: ${p.value.toFixed(3)}`}</title>
+              </circle>
+            );
+          })}
+          {/* Gradient legend */}
+          <defs>
+            <linearGradient id={`val-${indicatorId}-${layer}`} x1="0" x2="1">
+              <stop offset="0%" stopColor={gradientForDirection(0, targetDirection, colorblindMode)} />
+              <stop offset="50%" stopColor={gradientForDirection(0.5, targetDirection, colorblindMode)} />
+              <stop offset="100%" stopColor={gradientForDirection(1, targetDirection, colorblindMode)} />
+            </linearGradient>
+          </defs>
+          <rect x={margin.l + 4} y={6} width={120} height={8}
+            fill={`url(#val-${indicatorId}-${layer})`} rx={2} />
+          <text x={margin.l + 2} y={20} fontSize={8} fill="#718096">{p5.toFixed(2)}</text>
+          <text x={margin.l + 124} y={20} textAnchor="end" fontSize={8} fill="#718096">{p95.toFixed(2)}</text>
         </svg>
       </Box>
     </Box>
@@ -1165,24 +1285,12 @@ export function SpatialScatterByLayer({ gpsImages, indicatorId }: SpatialScatter
 interface CrossIndicatorSpatialMapsProps {
   gpsImages: UploadedImage[];
   indicatorIds: string[];
+  colorblindMode?: boolean;
 }
 
-/** YlOrRd-ish gradient: yellow → orange → red. `t` in [0, 1]. */
-function ylOrRdColor(t: number): string {
-  const clamped = Math.max(0, Math.min(1, t));
-  const stops = [
-    [255, 255, 178], // yellow
-    [253, 141, 60],  // orange
-    [189, 0, 38],    // red
-  ];
-  const seg = clamped * (stops.length - 1);
-  const i0 = Math.floor(seg);
-  const i1 = Math.min(stops.length - 1, i0 + 1);
-  const f = seg - i0;
-  const r = Math.round(stops[i0][0] * (1 - f) + stops[i1][0] * f);
-  const g = Math.round(stops[i0][1] * (1 - f) + stops[i1][1] * f);
-  const b = Math.round(stops[i0][2] * (1 - f) + stops[i1][2] * f);
-  return `rgb(${r},${g},${b})`;
+/** YlOrRd → Viridis when colorblindMode is on. `t` in [0, 1]. */
+function ylOrRdColor(t: number, colorblindMode = false): string {
+  return magnitudeColor(t, colorblindMode);
 }
 
 const CATEGORICAL_PALETTE = [
@@ -1204,6 +1312,7 @@ function renderCrossScatter(
   mode: 'gradient' | 'categorical',
   getColor: (p: CrossPoint) => string,
   valueFn: (p: CrossPoint) => string,
+  colorblindMode = false,
 ) {
   if (points.length === 0) return null;
   const svgW = 340;
@@ -1237,9 +1346,9 @@ function renderCrossScatter(
         <>
           <defs>
             <linearGradient id={`ylOrRd-${points.length}`} x1="0" x2="1" y1="0" y2="0">
-              <stop offset="0%" stopColor={ylOrRdColor(0)} />
-              <stop offset="50%" stopColor={ylOrRdColor(0.5)} />
-              <stop offset="100%" stopColor={ylOrRdColor(1)} />
+              <stop offset="0%" stopColor={ylOrRdColor(0, colorblindMode)} />
+              <stop offset="50%" stopColor={ylOrRdColor(0.5, colorblindMode)} />
+              <stop offset="100%" stopColor={ylOrRdColor(1, colorblindMode)} />
             </linearGradient>
           </defs>
           <rect x={margin.l + plotW - 110} y={margin.t + 4} width={90} height={8} fill={`url(#ylOrRd-${points.length})`} rx={2} />
@@ -1251,7 +1360,7 @@ function renderCrossScatter(
   );
 }
 
-export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndicatorSpatialMapsProps) {
+export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds, colorblindMode }: CrossIndicatorSpatialMapsProps) {
   // Compute only for full layer (aggregated view — per-layer breakdown in Deep Dive)
   const points = useMemo(() => {
     // Mean/std per indicator across all GPS points (full layer)
@@ -1338,8 +1447,9 @@ export function CrossIndicatorSpatialMaps({ gpsImages, indicatorIds }: CrossIndi
           {renderCrossScatter(
             points,
             'gradient',
-            p => ylOrRdColor(p.meanAbsZ / 2),
+            p => ylOrRdColor(p.meanAbsZ / 2, colorblindMode),
             p => `Mean |Z| = ${p.meanAbsZ.toFixed(3)}`,
+            colorblindMode,
           )}
         </Box>
         <Box>
@@ -1573,7 +1683,7 @@ export function SilhouetteCurve({ scores, bestK }: SilhouetteCurveProps) {
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis dataKey="k" tick={{ fontSize: 11 }} label={{ value: 'Number of Clusters (K)', position: 'insideBottom', offset: -2, fontSize: 11 }} />
         <YAxis tick={{ fontSize: 11 }} label={{ value: 'Silhouette Score', angle: -90, position: 'insideLeft', fontSize: 11 }} domain={[0, 'auto']} />
-        <Tooltip formatter={(v: number) => [v.toFixed(4), 'Silhouette']} />
+        <Tooltip formatter={(v: number | undefined) => [v != null ? v.toFixed(4) : '—', 'Silhouette']} />
         <ReferenceLine x={bestK} stroke="#805AD5" strokeDasharray="5 5" label={{ value: `K=${bestK}`, position: 'top', fontSize: 10, fill: '#805AD5' }} />
         <Line type="monotone" dataKey="silhouette" stroke="#3182CE" strokeWidth={2} dot={{ r: 4, fill: '#3182CE' }} activeDot={{ r: 6 }} />
       </LineChart>
@@ -1751,8 +1861,12 @@ export function GlobalStatsTable({ stats }: GlobalStatsTableProps) {
           const layerKeys = ['full', 'foreground', 'middleground', 'background'];
           const layerVals = layerKeys.map(l => s.by_layer[l]);
           const cells: string[] = [
-            ...layerVals.map(v => v ? `${v.Mean?.toFixed(1)}±${v.Std?.toFixed(1)}` : '-'),
-            s.cv_full != null ? `${s.cv_full.toFixed(0)}` : '-',
+            ...layerVals.map(v =>
+              v && v.Mean != null && v.Std != null
+                ? `${v.Mean.toFixed(1)}±${v.Std.toFixed(1)}`
+                : '—',
+            ),
+            s.cv_full != null ? `${s.cv_full.toFixed(0)}` : '—',
             fmtP(s.shapiro_p),
             fmtP(s.kruskal_p),
           ];
@@ -1822,9 +1936,9 @@ export function DataQualityTable({ rows }: DataQualityTableProps) {
           const y = headerH + ri * rowH;
           const cells: string[] = [
             String(r.total_images),
-            r.fg_coverage_pct != null ? `${r.fg_coverage_pct.toFixed(0)}` : '-',
-            r.mg_coverage_pct != null ? `${r.mg_coverage_pct.toFixed(0)}` : '-',
-            r.bg_coverage_pct != null ? `${r.bg_coverage_pct.toFixed(0)}` : '-',
+            r.fg_coverage_pct != null ? `${r.fg_coverage_pct.toFixed(0)}` : '—',
+            r.mg_coverage_pct != null ? `${r.mg_coverage_pct.toFixed(0)}` : '—',
+            r.bg_coverage_pct != null ? `${r.bg_coverage_pct.toFixed(0)}` : '—',
             r.is_normal == null ? '-' : r.is_normal ? 'Yes' : 'No',
             r.correlation_method,
           ];

@@ -57,7 +57,25 @@ celerybeat.pid
 
 # Database
 *.sqlite3
+*.sqlite
 *.db
 *.db-shm
 *.db-wal
 *.db-journal
+
+# Working / handoff documents (keep out of public repo)
+*.docx
+*.doc
+~$*
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Backend runtime caches and uploads
+packages/backend/temp/
+packages/backend/outputs/
+packages/backend/data/chart_summary_cache.sqlite
+packages/backend/data/*.cache.*
+
+# Vision-side stray files
+packages/backend/data/uploads/

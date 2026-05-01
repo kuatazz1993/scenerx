@@ -1,7 +1,7 @@
-version: '3.8'
-
-# Development override - use with:
-# docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Development override — hot-reload mode. Use via:
+#   make dev
+# or:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 services:
   # PostgreSQL Database (same as production)

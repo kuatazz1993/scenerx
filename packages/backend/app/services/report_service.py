@@ -92,7 +92,19 @@ P4: Principal caveat
 ### 2. Indicator Selection and Evidence Base
 One subsection per indicator covering: identity, SVC matrix position, performance
 linkage, evidence strength, transferability, relationships, target direction.
-End with cross-indicator synthesis paragraph.
+The Stage 1 payload now includes explicit fields you MUST use to answer
+the four questions below in this section:
+  Q1. Why these N indicators? Use `framework_mapping_brief` and the
+      performance_link to justify each pick against the design brief.
+  Q2. Which alternatives were considered and rejected? List the IDs from
+      `considered_alternatives` with their `reject_reason`. If empty,
+      acknowledge the omission.
+  Q3. How strong is the evidence? Translate each indicator's
+      `evidence_tier_distribution` (e.g. {{"TIR_T1": 5, "TIR_C": 1}}) into
+      plain language and cite a few `evidence_ids`.
+  Q4. Is transferability matched? Quote each `transferability_match_pct`
+      and discuss any sub-50% indicator as a caveat.
+End with a cross-indicator synthesis paragraph.
 
 ### 3. Spatial Diagnosis and Archetype Analysis
 3.1 Project-level overview (N points, clustering method, silhouette)
@@ -113,10 +125,25 @@ Per spatial unit, ordered by priority:
 5.3 Monitoring framework (indicator, target delta-z, interval, success criterion)
 
 ### 6. Evidence Quality Assessment and Limitations
-6.1 Evidence strength profile table
-6.2 Transferability assessment table (climate, LCZ, setting, user group)
-6.3 Knowledge gaps
-6.4 Methodological caveats
+The Stage 2 payload now exposes a `data_quality_flags` object that you MUST
+discuss explicitly — do NOT speak in generalities. Address every populated
+flag below with one or two concrete sentences.
+6.1 Evidence strength profile table — derive from Stage 1 evidence_tier_distribution.
+6.2 Transferability assessment table — climate, LCZ, setting, user group;
+    use Stage 1 transferability_match_pct to mark each row.
+6.3 Data quality flags (REQUIRED). For each flag that is non-trivial, state
+    its value and explain how it constrains conclusions:
+      - is_single_zone (cross-zone z-scores fall back to image-level)
+      - n_zones / analysis_mode
+      - indicators_with_nan (list the affected IDs)
+      - layer_coverage_pct (how complete the FG/MG/BG split is)
+      - low_confidence_evidence_ratio (share of recommended indicators whose
+        evidence is dominated by descriptive / weakest-tier records — flag as
+        a confidence caveat when > 0.3)
+      - low_transferability_indicators (indicator IDs whose supporting
+        evidence pool's transferability to this project is mostly low or
+        unknown; cite each one explicitly as a context caveat)
+6.4 Knowledge gaps and methodological caveats.
 
 ## Input Data
 
@@ -160,12 +187,26 @@ class ReportService:
         """Generate comprehensive evidence-based design strategy report."""
         t0 = time.time()
 
+        # Pre-flight: warn the LLM up front when single-zone analysis has yielded
+        # all-zero deviations (image-level fallback active but no within-zone
+        # variance to discuss). The flag is later embedded in stage2_data so the
+        # prompt can surface it as a caveat in Section 6 instead of returning
+        # generic boilerplate.
+        za = request.zone_analysis
+        is_image_level = (za.analysis_mode or "zone_level") == "image_level"
+        all_zero_deviation = bool(
+            za.zone_diagnostics
+            and all(d.mean_abs_z == 0 for d in za.zone_diagnostics)
+        )
+
         # Prepare compact data summaries
         project_context = json.dumps(
             request.project_context.model_dump(), ensure_ascii=False, indent=2
         )
         stage1_data = self._prepare_stage1(request.stage1_recommendations)
-        stage2_data = self._prepare_stage2(request.zone_analysis)
+        stage2_data = self._prepare_stage2(
+            request.zone_analysis, request.stage1_recommendations
+        )
         stage3_data = self._prepare_stage3(request.design_strategies)
         encoding_ref = json.dumps(
             self.kb.get_codebook_subset(max_chars=20000), ensure_ascii=False, indent=2
@@ -202,6 +243,12 @@ class ReportService:
             "unique_references": len(set(coded_refs)),
             "section_count": len(sections),
             "chain_reasoning_count": chain_refs,
+            "analysis_mode": za.analysis_mode or "zone_level",
+            "data_quality_warning": (
+                "Single-zone analysis returned no cross-zone variance — "
+                "add a second zone or run sub-zone clustering for richer diagnostics."
+                if is_image_level and all_zero_deviation else None
+            ),
             "sections_present": {
                 "executive_summary": "Executive Summary" in report_text or "## 1" in report_text,
                 "indicator_selection": "Indicator Selection" in report_text or "## 2" in report_text,
@@ -228,25 +275,66 @@ class ReportService:
     # ------------------------------------------------------------------
 
     def _prepare_stage1(self, recommendations: Optional[list[dict]]) -> str:
-        """Compact Stage 1 indicator recommendations for prompt."""
+        """Compact Stage 1 indicator recommendations for prompt.
+
+        v2.0 (6.B(2)): expanded with rationale fields the report prompt's
+        Section 2 needs to answer the four questions:
+          1. Why these N indicators?
+          2. Which alternatives were considered and why rejected?
+          3. How strong is the evidence (tier distribution)?
+          4. Is transferability matched?
+        """
         if not recommendations:
             return "Stage 1 results not available."
 
         compact = []
         for rec in recommendations[:15]:
+            evidence_summary = rec.get("evidence_summary") or {}
+            transfer_summary = rec.get("transferability_summary") or {}
+
+            evidence_ids = (
+                rec.get("evidence_ids")
+                or evidence_summary.get("supporting_evidence_ids")
+                or []
+            )
+            tier_dist = (
+                rec.get("evidence_tier_distribution")
+                or evidence_summary.get("tier_distribution")
+                or {}
+            )
+            considered = rec.get("considered_alternatives") or []
+            framework_brief = rec.get("framework_mapping_brief") or rec.get(
+                "framework_mapping", ""
+            )
+            transfer_pct = (
+                rec.get("transferability_match_pct")
+                if rec.get("transferability_match_pct") is not None
+                else transfer_summary.get("match_pct")
+            )
+
             compact.append({
                 "rank": rec.get("rank"),
                 "indicator_id": rec.get("indicator_id", rec.get("indicator", {}).get("id", "")),
                 "indicator_name": rec.get("indicator_name", rec.get("indicator", {}).get("name", "")),
                 "performance_link": rec.get("performance_link", {}),
-                "evidence_summary": rec.get("evidence_summary", {}),
-                "transferability_summary": rec.get("transferability_summary", {}),
+                "evidence_summary": evidence_summary,
+                # 6.B(2) — explicit rationale fields
+                "evidence_ids": evidence_ids[:8],
+                "evidence_tier_distribution": tier_dist,
+                "considered_alternatives": considered[:6],
+                "framework_mapping_brief": framework_brief,
+                "transferability_match_pct": transfer_pct,
+                "transferability_summary": transfer_summary,
                 "target_direction": rec.get("target_direction", {}),
                 "rationale": (rec.get("rationale", "") or "")[:300],
             })
         return json.dumps(compact, ensure_ascii=False, indent=2)
 
-    def _prepare_stage2(self, zone_analysis: ZoneAnalysisResult) -> str:
+    def _prepare_stage2(
+        self,
+        zone_analysis: ZoneAnalysisResult,
+        recommendations: Optional[list[dict]] = None,
+    ) -> str:
         """Compact Stage 2 zone analysis for prompt (v6.0 descriptive)."""
         meta = zone_analysis.computation_metadata
         summary: dict = {
@@ -332,7 +420,13 @@ class ReportService:
             ]
 
         # v7.0 analysis mode
-        summary["analysis_mode"] = zone_analysis.analysis_mode or "multi_zone"
+        summary["analysis_mode"] = zone_analysis.analysis_mode or "zone_level"
+        summary["zone_source"] = zone_analysis.zone_source
+
+        # 6.B(3) — explicit data quality flags fed into Agent C §6
+        summary["data_quality_flags"] = self._compute_data_quality_flags(
+            zone_analysis, recommendations
+        )
 
         # Significant correlations
         sig_pairs = []
@@ -355,6 +449,101 @@ class ReportService:
             summary["significant_correlations"] = sorted(sig_pairs, key=lambda x: -abs(x["r"]))
 
         return json.dumps(summary, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _compute_data_quality_flags(
+        zone_analysis: ZoneAnalysisResult,
+        recommendations: Optional[list[dict]] = None,
+    ) -> dict:
+        """Surface explicit quality signals so Agent C §6 can discuss them.
+
+        Flags exposed to the prompt:
+          - is_single_zone (n_zones <= 1)
+          - n_zones, analysis_mode
+          - indicators_with_nan (ids of indicators missing valid means)
+          - layer_coverage_pct (mean FG/MG/BG coverage)
+          - low_confidence_evidence_ratio (share of recommendations whose
+            supporting evidence is dominated by descriptive/Tier-3 records)
+          - low_transferability_indicators (indicators whose evidence pool's
+            climate/setting/age coverage is mostly low-or-unknown for this
+            project — replaces the doc's per-zone framing because zone context
+            in this data model is project-level, not per-zone)
+        """
+        flags: dict = {
+            "is_single_zone": False,
+            "n_zones": 0,
+            "indicators_with_nan": [],
+            "layer_coverage_pct": None,
+            "low_confidence_evidence_ratio": None,
+            "low_transferability_indicators": [],
+        }
+
+        meta = zone_analysis.computation_metadata
+        n_zones = meta.n_zones if meta else 0
+        flags["n_zones"] = n_zones
+        flags["is_single_zone"] = n_zones <= 1
+        flags["analysis_mode"] = zone_analysis.analysis_mode or "zone_level"
+
+        # Indicators with NaN means in the full layer
+        nan_indicators: list[str] = []
+        for s in zone_analysis.global_indicator_stats or []:
+            full = (s.by_layer or {}).get("full", {}) if hasattr(s, "by_layer") else {}
+            mean_val = full.get("Mean") if isinstance(full, dict) else None
+            n_val = full.get("N") if isinstance(full, dict) else None
+            if mean_val is None or n_val in (None, 0):
+                nan_indicators.append(s.indicator_id)
+        flags["indicators_with_nan"] = nan_indicators
+
+        # Mean FG/MG/BG coverage across indicators
+        if zone_analysis.data_quality:
+            coverages: list[float] = []
+            for row in zone_analysis.data_quality:
+                fg = getattr(row, "fg_coverage_pct", None) or 0.0
+                mg = getattr(row, "mg_coverage_pct", None) or 0.0
+                bg = getattr(row, "bg_coverage_pct", None) or 0.0
+                coverages.append((fg + mg + bg) / 3.0)
+            if coverages:
+                flags["layer_coverage_pct"] = round(sum(coverages) / len(coverages), 1)
+
+        # Recommendation-derived flags
+        if recommendations:
+            low_conf = 0
+            low_transfer: list[str] = []
+            counted = 0
+            for rec in recommendations:
+                ev = rec.get("evidence_summary") or {}
+                ts = rec.get("transferability_summary") or {}
+                ind_id = rec.get("indicator_id") or rec.get("indicator", {}).get("id", "")
+
+                inf = ev.get("inferential_count", 0) or 0
+                desc = ev.get("descriptive_count", 0) or 0
+                strongest = (ev.get("strongest_tier") or "").upper()
+                # Low-confidence indicator: no inferential records, OR best tier
+                # is the weakest, OR descriptive evidence outweighs inferential
+                is_low_conf = (
+                    inf == 0
+                    or strongest in ("TIR_T3", "TIR_C", "")
+                    or (desc > 0 and desc >= inf * 2)
+                )
+                if inf or desc:
+                    counted += 1
+                    if is_low_conf:
+                        low_conf += 1
+
+                hi = ts.get("high_count", 0) or 0
+                mod = ts.get("moderate_count", 0) or 0
+                lo = ts.get("low_count", 0) or 0
+                unk = ts.get("unknown_count", 0) or 0
+                # Low-transferability indicator: weak/unknown evidence outnumbers
+                # the high+moderate-transferability evidence
+                if (lo + unk) > (hi + mod) and ind_id:
+                    low_transfer.append(ind_id)
+
+            if counted:
+                flags["low_confidence_evidence_ratio"] = round(low_conf / counted, 2)
+            flags["low_transferability_indicators"] = low_transfer
+
+        return flags
 
     def _prepare_stage3(self, design_result: Optional[DesignStrategyResult]) -> str:
         """Compact Stage 3 design strategies for prompt (v6.0)."""

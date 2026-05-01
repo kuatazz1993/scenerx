@@ -46,6 +46,15 @@ export interface Project {
   spatial_zones: SpatialZone[];
   spatial_relations: SpatialRelation[];
   uploaded_images: UploadedImage[];
+
+  // Persisted analysis artefacts (server-side source of truth — survive
+  // reloads and project switches). Frontend hydrates the Zustand store from
+  // these on project mount; localStorage no longer holds them.
+  zone_analysis_result?: ZoneAnalysisResult | null;
+  design_strategy_result?: DesignStrategyResult | null;
+  ai_report?: string | null;
+  ai_report_meta?: Record<string, unknown> | null;
+  analysis_results_updated_at?: string | null;
 }
 
 export interface SpatialZoneCreate {
@@ -385,7 +394,8 @@ export interface ZoneAnalysisResult {
   image_records?: ImageRecord[];
   global_indicator_stats?: GlobalIndicatorStats[];
   data_quality?: DataQualityRow[];
-  analysis_mode?: 'multi_zone' | 'single_zone';
+  analysis_mode?: 'zone_level' | 'image_level';
+  zone_source?: 'user' | 'cluster' | null;
 }
 
 // Clustering types
@@ -619,3 +629,30 @@ export type ProjectPipelineStreamEvent =
     }
   | { type: 'result'; data: ProjectPipelineResult }
   | { type: 'error'; message: string };
+
+// Encoding dictionary (knowledge-base codebook) types
+export interface SupportingPaper {
+  paper_file?: string;
+  doi?: string;
+  citation?: string;
+}
+
+export interface EncodingEntry {
+  code: string;
+  name: string;
+  definition: string;
+  supporting_papers: SupportingPaper[];
+  parent_dim?: string | null;
+  evidence_count?: number | null;
+}
+
+export type EncodingSectionKey =
+  | 'K_climate'
+  | 'E_countries'
+  | 'E_settings'
+  | 'L_lcz'
+  | 'M_age_groups'
+  | 'C_performance'
+  | 'C_subdimensions';
+
+export type EncodingSections = Record<EncodingSectionKey, EncodingEntry[]>;

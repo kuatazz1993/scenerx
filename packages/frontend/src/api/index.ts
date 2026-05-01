@@ -28,6 +28,8 @@ import type {
   ClusteringByProjectRequest,
   ClusteringResponse,
   MergedExportRequest,
+  EncodingEntry,
+  EncodingSections,
 } from '../types';
 
 // Health & Config
@@ -37,7 +39,30 @@ export const api = {
 
   // Config
   getConfig: () => apiClient.get<AppConfig>('/api/config'),
-  testVision: () => apiClient.post<{ healthy: boolean; config: unknown }>('/api/config/test-vision'),
+  testVision: () => apiClient.post<{
+    healthy: boolean;
+    info: {
+      status: string;
+      gpu_available: boolean;
+      gpu_name: string | null;
+      gpu_memory: string | null;
+      gpu_memory_gb: number | null;
+      models_loaded: boolean;
+      semantic_classes: number;
+      depth_backend: string;
+      depth_model: string;
+      available_depth_models: Array<{
+        id: string;
+        label: string;
+        params_billions: number;
+        vram_gb: number;
+        depth_type: string;
+        sky_detection: string;
+        notes: string;
+      }>;
+    } | null;
+    config: unknown;
+  }>('/api/config/test-vision'),
   testGemini: () => apiClient.post<{ configured: boolean; provider: string; model: string | null }>('/api/config/test-gemini'),
   testLLM: () => apiClient.post<{ configured: boolean; provider: string; model: string | null }>('/api/config/test-llm'),
   getLLMProviders: () => apiClient.get<LLMProviderInfo[]>('/api/config/llm-providers'),
@@ -216,6 +241,13 @@ export const api = {
     getKnowledgeBaseSummary: () => apiClient.get<KnowledgeBaseSummary>('/api/indicators/knowledge-base/summary'),
   },
 
+  // Encoding dictionary (knowledge-base codebook)
+  encoding: {
+    getSections: () => apiClient.get<EncodingSections>('/api/encoding/sections'),
+    getSection: (section: string) =>
+      apiClient.get<EncodingEntry[]>(`/api/encoding/sections/${section}`),
+  },
+
   // Tasks
   tasks: {
     getStatus: (taskId: string) => apiClient.get<TaskStatus>(`/api/tasks/${taskId}`),
@@ -307,6 +339,21 @@ export const api = {
     },
     generateReport: (data: ReportRequest) =>
       apiClient.post<ReportResult>('/api/analysis/generate-report', data),
+    chartSummary: (data: {
+      chart_id: string;
+      chart_title: string;
+      chart_description?: string | null;
+      project_id: string;
+      payload: Record<string, unknown>;
+      project_context?: Record<string, unknown> | null;
+    }) =>
+      apiClient.post<{
+        summary: string;
+        highlight_points: string[];
+        cached: boolean;
+        model: string;
+        error?: string | null;
+      }>('/api/analysis/chart-summary', data),
   },
 
   // Auth

@@ -15,6 +15,7 @@ export const queryKeys = {
   knowledgeBase: ['knowledgeBase'],
   providerModels: (provider: string) => ['provider-models', provider],
   task: (id: string) => ['task', id],
+  encodingSections: ['encoding-sections'],
 };
 
 // Health & Config hooks
@@ -210,6 +211,29 @@ export function useGenerateReport() {
   });
 }
 
+interface ChartSummaryArgs {
+  chart_id: string;
+  chart_title: string;
+  chart_description?: string | null;
+  project_id: string;
+  payload: Record<string, unknown>;
+  project_context?: Record<string, unknown> | null;
+  /** When false, the query is held back until the user opens the panel. */
+  enabled?: boolean;
+}
+
+export function useChartSummary(args: ChartSummaryArgs) {
+  const { enabled = false, ...body } = args;
+  return useQuery({
+    queryKey: ['chart-summary', body.chart_id, body.project_id, body.payload],
+    queryFn: () => api.analysis.chartSummary(body).then(r => r.data),
+    enabled,
+    staleTime: 1000 * 60 * 60, // 1 hour — backend cache is the real TTL
+    refetchOnWindowFocus: false,
+    retry: 1,
+  });
+}
+
 // Vision project image analysis mutation
 export function useAnalyzeProjectImage() {
   const queryClient = useQueryClient();
@@ -260,5 +284,15 @@ export function useCurrentUser(enabled = false) {
     queryFn: () => api.auth.me().then(r => r.data),
     enabled,
     retry: false,
+  });
+}
+
+// Encoding dictionary (knowledge-base codebook). Static data, cache forever.
+export function useEncodingSections() {
+  return useQuery({
+    queryKey: queryKeys.encodingSections,
+    queryFn: () => api.encoding.getSections().then((r) => r.data),
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 }

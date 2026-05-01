@@ -1,5 +1,6 @@
-import { useMemo, useCallback, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useMemo, useCallback, useState, useEffect, useRef } from 'react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Box,
   Heading,
@@ -47,10 +48,26 @@ import useAppToast from '../hooks/useAppToast';
 import PageShell from '../components/PageShell';
 import PageHeader from '../components/PageHeader';
 import EmptyState from '../components/EmptyState';
-import { CHART_REGISTRY } from '../components/analysisCharts/registry';
-import { ChartHost } from '../components/analysisCharts/ChartHost';
+import {
+  CHART_REGISTRY,
+  SECTION_ORDER,
+  type ChartSection,
+} from '../components/analysisCharts/registry';
+import { SectionHeading } from '../components/analysisCharts/SectionHeading';
+import { ChartHost, type ChartHostHandle } from '../components/analysisCharts/ChartHost';
 import { ChartPicker } from '../components/analysisCharts/ChartPicker';
 import { buildChartContext } from '../components/analysisCharts/ChartContext';
+import { ModeAlert } from '../components/analysisCharts/ModeAlert';
+import { DataQualitySummary } from '../components/analysisCharts/DataQualitySummary';
+import { LayerSelector } from '../components/analysisCharts/LayerSelector';
+import { LAYER_OPTIONS } from '../components/analysisCharts/layerOptions';
+import { AnalysisConfidenceGauge } from '../components/analysisCharts/AnalysisConfidenceGauge';
+import { GlossaryDrawer } from '../components/GlossaryDrawer';
+import {
+  captureChartsForReport,
+  waitForPaint,
+  type CapturedChart,
+} from '../utils/captureCharts';
 import type { ReportRequest, ZoneDiagnostic, ZoneDesignOutput, ClusteringResponse } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -148,9 +165,41 @@ function renderMarkdown(md: string) {
 // Reports Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Walk the React Query cache for chart-summary entries belonging to the
+ * current project and roll them into the analysis_narratives shape consumed
+ * by the design-strategies endpoint. All current registry summaries are
+ * cross-zone, so we file them under "_global".
+ */
+function collectAnalysisNarratives(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectId: string | null | undefined,
+): Record<string, Record<string, string>> {
+  if (!projectId) return {};
+  const queries = queryClient.getQueryCache().findAll({ queryKey: ['chart-summary'] });
+  const globals: Record<string, string> = {};
+  for (const q of queries) {
+    const key = q.queryKey as unknown[];
+    if (key[2] !== projectId) continue;
+    const data = q.state.data as
+      | { summary?: string; highlight_points?: string[] }
+      | undefined;
+    if (!data?.summary) continue;
+    const chartId = String(key[1] ?? '');
+    if (!chartId) continue;
+    const bullets = data.highlight_points?.length
+      ? '\n  • ' + data.highlight_points.join('\n  • ')
+      : '';
+    globals[chartId] = `${data.summary}${bullets}`;
+  }
+  if (Object.keys(globals).length === 0) return {};
+  return { _global: globals };
+}
+
 function Reports() {
   const { projectId: routeProjectId } = useParams<{ projectId: string }>();
   const toast = useAppToast();
+  const queryClient = useQueryClient();
 
   const {
     currentProject,
@@ -168,6 +217,10 @@ function Reports() {
     hiddenChartIds,
     toggleChart,
     resetCharts,
+    showAiSummary,
+    setShowAiSummary,
+    colorblindMode,
+    setColorblindMode,
   } = useAppStore();
 
   const projectName = currentProject?.project_name || pipelineResult?.project_name || 'Unknown Project';
@@ -180,9 +233,40 @@ function Reports() {
   const designStrategiesMutation = useRunDesignStrategies();
   const [clusteringResult, setClusteringResult] = useState<ClusteringResponse | null>(null);
 
-  // Layer — fixed to full (per-layer breakdowns shown inline in Deep Dive,
-  // Radar by Layer, Global Stats, and Distribution charts)
-  const selectedLayer = 'full';
+  // Chart export plumbing (6.B(1)). chartRefs is populated by ref callbacks
+  // on every ChartHost; exporting flips forceMount so lazy-loaded cards and
+  // the clustering accordion render before captureChartsForReport runs.
+  const chartRefs = useRef<Map<string, ChartHostHandle | null>>(new Map());
+  const [exporting, setExporting] = useState(false);
+  const setChartRef = useCallback((id: string) => (handle: ChartHostHandle | null) => {
+    if (handle) chartRefs.current.set(id, handle);
+    else chartRefs.current.delete(id);
+  }, []);
+
+  // Global layer selector — drives any chart with `layerAware: true`. Synced
+  // to ?layer=... so reloads / shared links keep the view.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialLayer = (() => {
+    const fromUrl = searchParams.get('layer');
+    if (fromUrl && LAYER_OPTIONS.some((o) => o.value === fromUrl)) return fromUrl;
+    return 'full';
+  })();
+  const [selectedLayer, setSelectedLayer] = useState<string>(initialLayer);
+  useEffect(() => {
+    const current = searchParams.get('layer');
+    if (selectedLayer === 'full') {
+      if (current) {
+        const next = new URLSearchParams(searchParams);
+        next.delete('layer');
+        setSearchParams(next, { replace: true });
+      }
+      return;
+    }
+    if (current === selectedLayer) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('layer', selectedLayer);
+    setSearchParams(next, { replace: true });
+  }, [selectedLayer, searchParams, setSearchParams]);
 
   // Check if Stage 3 failed in pipeline
   const stage3Failed = pipelineResult?.steps?.some(s => s.step === 'design_strategies' && s.status === 'failed') ?? false;
@@ -194,11 +278,19 @@ function Reports() {
     if (!zoneAnalysisResult) return;
     toast({ title: 'Retrying design strategies...', status: 'info', duration: 3000 });
     try {
+      const narratives = collectAnalysisNarratives(queryClient, routeProjectId);
       const result = await designStrategiesMutation.mutateAsync({
         zone_analysis: zoneAnalysisResult,
+        analysis_narratives: narratives,
         use_llm: true,
+        project_id: routeProjectId ?? undefined,
       });
       useAppStore.getState().setDesignStrategyResult(result);
+      // Stage 3 changed → backend cleared the cached AI report; mirror that
+      // locally so the Report step's "done" indicator and the AI-report
+      // card don't show stale content.
+      useAppStore.getState().setAiReport(null);
+      useAppStore.getState().setAiReportMeta(null);
       toast({ title: 'Design strategies generated', status: 'success' });
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'response' in err
@@ -206,7 +298,7 @@ function Reports() {
         : 'Strategy generation failed';
       toast({ title: msg, status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategiesMutation, toast]);
+  }, [zoneAnalysisResult, designStrategiesMutation, toast, queryClient, routeProjectId]);
 
   const handleRunClustering = useCallback(async () => {
     if (!zoneAnalysisResult || !currentProject) return;
@@ -247,7 +339,9 @@ function Reports() {
       const request: ReportRequest = {
         zone_analysis: zoneAnalysisCompact as typeof zoneAnalysisResult,
         design_strategies: designStrategyResult ?? undefined,
-        stage1_recommendations: recommendations.length > 0 ? recommendations : undefined,
+        stage1_recommendations: recommendations.length > 0
+          ? (recommendations as unknown as Record<string, unknown>[])
+          : undefined,
         project_context: currentProject ? {
           project: { name: currentProject.project_name, location: currentProject.project_location },
           context: {
@@ -261,15 +355,34 @@ function Reports() {
           },
         } : undefined,
         format: 'markdown',
+        project_id: routeProjectId ?? undefined,
       };
       const result = await generateReportMutation.mutateAsync(request);
       setAiReport(result.content);
       setAiReportMeta(result.metadata);
-      toast({ title: `AI report generated — ${result.metadata.word_count || '?'} words`, status: 'success' });
+      const wc = Number(result.metadata?.word_count ?? 0);
+      const dataWarning = result.metadata?.data_quality_warning as string | undefined;
+      if (dataWarning) {
+        toast({
+          title: 'AI report generated with caveats',
+          description: dataWarning,
+          status: 'warning',
+          duration: 8000,
+        });
+      } else if (wc < 100) {
+        toast({
+          title: 'AI report has minimal content',
+          description: `Only ${wc} words returned — likely thin source data. Check that analysis charts have non-zero values.`,
+          status: 'warning',
+          duration: 8000,
+        });
+      } else {
+        toast({ title: `AI report generated — ${wc} words`, status: 'success' });
+      }
     } catch {
       toast({ title: 'AI report generation failed', status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategyResult, recommendations, currentProject, generateReportMutation, toast]);
+  }, [zoneAnalysisResult, designStrategyResult, recommendations, currentProject, generateReportMutation, toast, setAiReport, setAiReportMeta, routeProjectId]);
 
   // Completion status
   const hasVision = (currentProject?.uploaded_images?.length ?? 0) > 0;
@@ -295,9 +408,26 @@ function Reports() {
         clusteringResult,
         currentProject: currentProject ?? null,
         selectedLayer,
+        colorblindMode,
       }),
-    [zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer],
+    [zoneAnalysisResult, pipelineResult, clusteringResult, currentProject, selectedLayer, colorblindMode],
   );
+
+  // Compact project context handed to chart-summary requests so LLM grounding
+  // doesn't require a separate fetch per chart.
+  const chartProjectContext = useMemo<Record<string, unknown> | null>(() => {
+    if (!currentProject) return null;
+    return {
+      project_name: currentProject.project_name,
+      project_location: currentProject.project_location,
+      koppen_zone: currentProject.koppen_zone_id,
+      space_type: currentProject.space_type_id,
+      lcz_type: currentProject.lcz_type_id,
+      age_group: currentProject.age_group_id,
+      performance_dimensions: currentProject.performance_dimensions,
+      design_brief: currentProject.design_brief,
+    };
+  }, [currentProject]);
 
   const hiddenSet = useMemo(() => new Set(hiddenChartIds), [hiddenChartIds]);
   // Unified analysis tab — all 'analysis' charts (formerly split between diagnostics+statistics)
@@ -309,15 +439,65 @@ function Reports() {
     () => analysisCharts.filter(c => c.section === 'clustering'),
     [analysisCharts],
   );
-  const nonClusteringCharts = useMemo(
-    () => analysisCharts.filter(c => c.section !== 'clustering'),
-    [analysisCharts],
-  );
+  // Group non-clustering charts by section so Reports.tsx can render
+  // sub-headings (5.10.2). Sections that have zero available charts (after
+  // ChartHost's own isAvailable check) still render their group header but
+  // the rendered list will be empty — handled with a fallback in the JSX.
+  const sectionedCharts = useMemo(() => {
+    const grouped: Partial<Record<ChartSection, typeof analysisCharts>> = {};
+    for (const c of analysisCharts) {
+      if (c.section === 'clustering') continue;
+      const list = grouped[c.section] ?? [];
+      list.push(c);
+      grouped[c.section] = list;
+    }
+    return grouped;
+  }, [analysisCharts]);
   const sortedDiagnostics = chartCtx.sortedDiagnostics;
 
+  // Pull cached chart-summary captions out of React Query so embedded images
+  // get human-readable captions when the user has generated them.
+  const captionFor = useCallback(
+    (chartId: string): string | null => {
+      const queries = queryClient.getQueryCache().findAll({ queryKey: ['chart-summary'] });
+      for (const q of queries) {
+        const key = q.queryKey as unknown[];
+        if (key[1] !== chartId) continue;
+        if (key[2] !== routeProjectId) continue;
+        const data = q.state.data as { summary?: string } | undefined;
+        if (data?.summary) return data.summary;
+      }
+      return null;
+    },
+    [queryClient, routeProjectId],
+  );
+
+  // Capture all exportByDefault charts. Sets `exporting` so lazy-loaded cards
+  // and the clustering accordion render before html2canvas runs.
+  const captureChartsForDownload = useCallback(async (): Promise<CapturedChart[]> => {
+    if (!hasAnalysis) return [];
+    setExporting(true);
+    try {
+      // Two paint frames — first lets React commit `exporting=true`,
+      // second lets ChartHosts unfold lazy bodies + the accordion.
+      await waitForPaint();
+      await waitForPaint();
+      return await captureChartsForReport({
+        charts: CHART_REGISTRY.filter((c) => c.tab === 'analysis'),
+        ctx: chartCtx,
+        refs: chartRefs.current,
+        captionFor,
+      });
+    } finally {
+      setExporting(false);
+    }
+  }, [hasAnalysis, chartCtx, captionFor]);
+
   // Downloads
-  const handleDownloadMarkdown = () => {
+  const handleDownloadMarkdown = useCallback(async () => {
     if (!zoneAnalysisResult) return;
+    toast({ title: 'Capturing charts…', status: 'info', duration: 2000 });
+    const chartImages = await captureChartsForDownload();
     const md = generateReport({
       projectName,
       pipelineResult,
@@ -325,6 +505,7 @@ function Reports() {
       designResult: designStrategyResult,
       radarProfiles: zoneAnalysisResult.radar_profiles ?? null,
       correlationByLayer: zoneAnalysisResult.correlation_by_layer ?? null,
+      chartImages,
     });
     const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -333,8 +514,13 @@ function Reports() {
     a.download = `${projectName.replace(/\s+/g, '_')}_report.md`;
     a.click();
     URL.revokeObjectURL(url);
-    toast({ title: 'Report downloaded', status: 'success' });
-  };
+    toast({
+      title: chartImages.length > 0
+        ? `Report downloaded — ${chartImages.length} chart(s) embedded`
+        : 'Report downloaded (no charts captured)',
+      status: 'success',
+    });
+  }, [zoneAnalysisResult, captureChartsForDownload, projectName, pipelineResult, designStrategyResult, toast]);
 
   const handleExportJson = () => {
     // Per-image metrics: flatten uploaded_images to id + zone + GPS + metrics
@@ -388,8 +574,9 @@ function Reports() {
 
   const handleDownloadPdf = useCallback(async () => {
     if (!zoneAnalysisResult) return;
-    toast({ title: 'Generating PDF...', status: 'info', duration: 2000 });
+    toast({ title: 'Capturing charts…', status: 'info', duration: 2000 });
     try {
+      const chartImages = await captureChartsForDownload();
       const { jsPDF } = await import('jspdf');
       const md = generateReport({
         projectName,
@@ -420,6 +607,44 @@ function Reports() {
         }
       };
 
+      const addChartImage = (chart: CapturedChart) => {
+        // Equal-aspect resize: cap width at pageW, scale height proportionally,
+        // then if it would overflow 60% of the page height shrink to fit.
+        const aspect = chart.heightPx > 0 ? chart.widthPx / chart.heightPx : 1;
+        let imgW = pageW;
+        let imgH = imgW / aspect;
+        const maxH = pageH * 0.6;
+        if (imgH > maxH) {
+          imgH = maxH;
+          imgW = imgH * aspect;
+        }
+        if (y + imgH + 12 > margin + pageH) {
+          pdf.addPage();
+          y = margin;
+        }
+        addText(chart.title, 11, 'bold');
+        try {
+          pdf.addImage(chart.dataURL, 'PNG', margin, y, imgW, imgH, undefined, 'FAST');
+        } catch (err) {
+          console.warn('PDF addImage failed for', chart.chart_id, err);
+        }
+        y += imgH + 2;
+        if (chart.caption) {
+          pdf.setFontSize(8);
+          pdf.setFont('helvetica', 'italic');
+          pdf.setTextColor(110);
+          const captionLines = pdf.splitTextToSize(chart.caption, pageW);
+          for (const line of captionLines) {
+            if (y + 4 > margin + pageH) { pdf.addPage(); y = margin; }
+            pdf.text(line, margin, y);
+            y += 3.5;
+          }
+          pdf.setTextColor(0);
+          pdf.setFont('helvetica', 'normal');
+        }
+        y += 4;
+      };
+
       // Title page
       pdf.setFontSize(20);
       pdf.setFont('helvetica', 'bold');
@@ -434,12 +659,27 @@ function Reports() {
         pdf.text(`Calculations: ${pipelineResult.calculations_succeeded} succeeded`, margin, 76);
         pdf.text(`Zone Stats: ${pipelineResult.zone_statistics_count}`, margin, 82);
         pdf.text(`Zones: ${sortedDiagnostics.length}`, margin, 88);
+        if (chartImages.length > 0) {
+          pdf.text(`Embedded Charts: ${chartImages.length}`, margin, 94);
+        }
       }
       pdf.addPage();
       y = margin;
 
-      // Render markdown content
+      // Embedded charts page (right after title, before text body)
+      if (chartImages.length > 0) {
+        addText('Charts', 16, 'bold');
+        y += 2;
+        for (const chart of chartImages) {
+          addChartImage(chart);
+        }
+        pdf.addPage();
+        y = margin;
+      }
+
+      // Render markdown content (text body — image lines already embedded above)
       for (const line of md.split('\n')) {
+        if (line.startsWith('![')) continue; // images already embedded
         if (line.startsWith('### ')) {
           y += 2;
           addText(line.slice(4), 12, 'bold');
@@ -481,11 +721,17 @@ function Reports() {
       }
 
       pdf.save(`${projectName.replace(/\s+/g, '_')}_report.pdf`);
-      toast({ title: 'PDF downloaded', status: 'success' });
-    } catch {
+      toast({
+        title: chartImages.length > 0
+          ? `PDF downloaded — ${chartImages.length} chart(s) embedded`
+          : 'PDF downloaded',
+        status: 'success',
+      });
+    } catch (err) {
+      console.error('PDF generation failed', err);
       toast({ title: 'PDF generation failed', status: 'error' });
     }
-  }, [zoneAnalysisResult, designStrategyResult, pipelineResult, projectName, sortedDiagnostics, toast]);
+  }, [zoneAnalysisResult, designStrategyResult, pipelineResult, projectName, sortedDiagnostics, toast, captureChartsForDownload]);
 
   const handleDownloadAiReportPdf = useCallback(async () => {
     if (!aiReport) return;
@@ -547,11 +793,16 @@ function Reports() {
     <PageShell>
       <PageHeader title="Results & Report">
         <HStack spacing={2}>
+          <GlossaryDrawer />
           {hasAnalysis && (
             <ChartPicker
               hiddenIds={hiddenChartIds}
               onToggle={toggleChart}
               onReset={resetCharts}
+              showAiSummary={showAiSummary}
+              onShowAiSummaryChange={setShowAiSummary}
+              colorblindMode={colorblindMode}
+              onColorblindModeChange={setColorblindMode}
             />
           )}
           <Tooltip label="Readable report with zone diagnostics, correlations, and design strategies" placement="bottom" hasArrow>
@@ -601,7 +852,7 @@ function Reports() {
       ) : (
         <Box>
           {/* Pipeline Overview */}
-          <Card mb={6}>
+          <Card mb={6} role="region" aria-label="Pipeline overview">
             <CardHeader>
               <HStack justify="space-between">
                 <Heading size="md">Pipeline Overview</Heading>
@@ -637,10 +888,17 @@ function Reports() {
 
           {/* AI Report Section — always visible when analysis exists */}
           {hasAnalysis && (
-            <Card mb={6} borderColor={aiReport ? 'purple.300' : 'gray.200'} borderWidth={aiReport ? 2 : 1} overflow="hidden">
+            <Card
+              mb={6}
+              borderColor={aiReport ? 'purple.300' : 'gray.200'}
+              borderWidth={aiReport ? 2 : 1}
+              overflow="hidden"
+              role="region"
+              aria-label="AI-generated report"
+            >
               <CardHeader>
                 <VStack align="stretch" spacing={3}>
-                  <HStack spacing={2}>
+                  <HStack spacing={2} flexWrap="wrap">
                     <Icon as={Sparkles} color="purple.500" boxSize={5} />
                     <Heading size="md">AI Report</Heading>
                     {!aiReport && <Badge colorScheme="gray" variant="subtle">Not generated</Badge>}
@@ -649,6 +907,15 @@ function Reports() {
                         {String(aiReportMeta.word_count || '?')} words
                       </Badge>
                     )}
+                    <Box flex="1" />
+                    <AnalysisConfidenceGauge
+                      ctx={chartCtx}
+                      aiReportWordCount={
+                        aiReportMeta?.word_count != null
+                          ? Number(aiReportMeta.word_count)
+                          : null
+                      }
+                    />
                   </HStack>
                   <HStack spacing={2} flexWrap="wrap">
                     <Button
@@ -703,6 +970,48 @@ function Reports() {
             <TabPanels>
               {/* ── Tab: Analysis (unified — replaces former Diagnostics + Statistics) ── */}
               <TabPanel px={0}>
+                {/* Sticky layer selector — drives any layerAware chart */}
+                <Box
+                  position="sticky"
+                  top={0}
+                  zIndex={2}
+                  bg="white"
+                  borderBottom="1px solid"
+                  borderColor="gray.200"
+                  py={2}
+                  px={1}
+                  mb={3}
+                >
+                  <HStack justify="space-between" flexWrap="wrap" gap={2}>
+                    <LayerSelector value={selectedLayer} onChange={setSelectedLayer} />
+                    <Text fontSize="xs" color="gray.500">
+                      Layer-independent charts ignore this selector.
+                    </Text>
+                  </HStack>
+                </Box>
+
+                {/* Single-zone / image-level mode banner */}
+                <ModeAlert
+                  analysisMode={chartCtx.analysisMode}
+                  zoneSource={chartCtx.zoneSource}
+                  projectId={routeProjectId ?? null}
+                  zoneCount={
+                    currentProject?.spatial_zones?.length ?? sortedDiagnostics.length
+                  }
+                  imageCount={chartCtx.imageRecords.length}
+                  onRunClustering={handleRunClustering}
+                  isClusteringRunning={clusteringMutation.isPending}
+                  canRunClustering={!!currentProject}
+                />
+
+                {/* Data Quality summary — surfaces report warning + key metrics */}
+                <DataQualitySummary
+                  ctx={chartCtx}
+                  reportWarning={
+                    (aiReportMeta?.data_quality_warning as string | undefined) ?? null
+                  }
+                />
+
                 {/* Computation warnings */}
                 {zoneAnalysisResult?.computation_metadata?.warnings?.length ? (
                   <Alert status="warning" mb={4} borderRadius="md" alignItems="flex-start">
@@ -731,9 +1040,9 @@ function Reports() {
                                   {diag.rank > 0 && <Badge colorScheme="purple" fontSize="xs">#{diag.rank}</Badge>}
                                   <Text fontWeight="bold" fontSize="sm" noOfLines={1}>{diag.zone_name}</Text>
                                 </HStack>
-                                <Badge colorScheme={deviationColorScheme(diag.mean_abs_z)}>|z|={diag.mean_abs_z?.toFixed(2) ?? '-'}</Badge>
+                                <Badge colorScheme={deviationColorScheme(diag.mean_abs_z)}>|z|={diag.mean_abs_z?.toFixed(2) ?? '—'}</Badge>
                               </HStack>
-                              <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Mean |Z-score|</Text><Text fontWeight="bold">{diag.mean_abs_z?.toFixed(2) ?? '-'}</Text></HStack>
+                              <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Mean |z|</Text><Text fontWeight="bold">{diag.mean_abs_z?.toFixed(2) ?? '—'}</Text></HStack>
                               <HStack justify="space-between"><Text fontSize="xs" color="gray.600">Points</Text><Text fontWeight="bold">{diag.point_count}</Text></HStack>
                             </VStack>
                           </CardBody>
@@ -741,10 +1050,33 @@ function Reports() {
                       ))}
                     </SimpleGrid>
 
-                    {/* All non-clustering analysis charts */}
-                    {nonClusteringCharts.map(chart => (
-                      <ChartHost key={chart.id} descriptor={chart} ctx={chartCtx} onHide={toggleChart} />
-                    ))}
+                    {/* Sectioned analysis charts (5.10.2 — narrative ordering) */}
+                    {SECTION_ORDER.filter(s => s !== 'clustering').map(section => {
+                      const charts = sectionedCharts[section] ?? [];
+                      if (charts.length === 0) return null;
+                      const visibleCount = charts.filter(c => c.isAvailable(chartCtx)).length;
+                      if (visibleCount === 0) return null;
+                      return (
+                        <Box key={section}>
+                          <SectionHeading section={section} />
+                          <VStack spacing={4} align="stretch">
+                            {charts.map(chart => (
+                              <ChartHost
+                                key={chart.id}
+                                ref={setChartRef(chart.id)}
+                                descriptor={chart}
+                                ctx={chartCtx}
+                                onHide={toggleChart}
+                                projectId={routeProjectId ?? null}
+                                projectContext={chartProjectContext}
+                                showAiSummary={showAiSummary}
+                                forceMount={exporting}
+                              />
+                            ))}
+                          </VStack>
+                        </Box>
+                      );
+                    })}
 
                     {/* GPS coverage hint — shown when no spatial charts rendered */}
                     {chartCtx.gpsImages.length === 0 && (
@@ -760,55 +1092,72 @@ function Reports() {
                       </Alert>
                     )}
 
-                    {/* Clustering */}
-                    <Card variant="outline">
-                      <CardBody>
-                        <HStack justify="space-between" flexWrap="wrap" gap={2}>
-                          <VStack align="start" spacing={0}>
-                            <Text fontWeight="bold" fontSize="sm">SVC Archetype Clustering</Text>
-                            <Text fontSize="xs" color="gray.500">
-                              Discover spatial archetypes via KMeans on image-level metrics (requires 10+ images with computed indicators)
+                    {/* Clustering — collapsed group (5.9). Forced open during
+                        report export so the inner ChartHosts get a chance to
+                        render before captureChartsForReport runs. */}
+                    <Accordion allowToggle index={exporting ? [0] : undefined}>
+                      <AccordionItem border="1px solid" borderColor="gray.200" borderRadius="md">
+                        <AccordionButton bg="gray.50" _hover={{ bg: 'gray.100' }}>
+                          <Box flex="1" textAlign="left">
+                            <HStack spacing={2}>
+                              <Text fontWeight="bold" fontSize="sm">SVC Archetype Clustering</Text>
+                              {clusteringResult?.clustering && (
+                                <Badge colorScheme="green" fontSize="2xs">
+                                  k={clusteringResult.clustering.k} · silhouette={clusteringResult.clustering.silhouette_score.toFixed(2)}
+                                </Badge>
+                              )}
+                              {clusteringResult?.skipped && (
+                                <Badge colorScheme="yellow" fontSize="2xs">{clusteringResult.reason}</Badge>
+                              )}
+                            </HStack>
+                            <Text fontSize="xs" color="gray.500" mt={0.5}>
+                              Discover spatial archetypes via KMeans on image-level metrics (requires 10+ images with computed indicators).
                             </Text>
-                          </VStack>
-                          <HStack>
-                            {clusteringResult?.clustering && (
-                              <Badge colorScheme="green">
-                                k={clusteringResult.clustering.k} silhouette={clusteringResult.clustering.silhouette_score.toFixed(2)}
-                              </Badge>
+                          </Box>
+                          <AccordionIcon />
+                        </AccordionButton>
+                        <AccordionPanel pb={4}>
+                          <VStack align="stretch" spacing={4}>
+                            <HStack justify="flex-end">
+                              <Button
+                                size="sm"
+                                colorScheme="teal"
+                                variant="outline"
+                                onClick={handleRunClustering}
+                                isLoading={clusteringMutation.isPending}
+                                isDisabled={!currentProject}
+                              >
+                                {clusteringResult?.clustering ? 'Re-run Clustering' : 'Run Clustering'}
+                              </Button>
+                            </HStack>
+                            {clusteringResult?.clustering && clusteringResult.clustering.archetype_profiles.length > 0 && (
+                              <Wrap spacing={2}>
+                                {clusteringResult.clustering.archetype_profiles.map(a => (
+                                  <WrapItem key={a.archetype_id}>
+                                    <Tag size="sm" colorScheme="teal" variant="subtle">
+                                      <TagLabel>Archetype {a.archetype_id}: {a.archetype_label} ({a.point_count} pts)</TagLabel>
+                                    </Tag>
+                                  </WrapItem>
+                                ))}
+                              </Wrap>
                             )}
-                            {clusteringResult?.skipped && (
-                              <Badge colorScheme="yellow">{clusteringResult.reason}</Badge>
-                            )}
-                            <Button
-                              size="sm"
-                              colorScheme="teal"
-                              variant="outline"
-                              onClick={handleRunClustering}
-                              isLoading={clusteringMutation.isPending}
-                              isDisabled={!currentProject}
-                            >
-                              {clusteringResult?.clustering ? 'Re-run' : 'Run Clustering'}
-                            </Button>
-                          </HStack>
-                        </HStack>
-                        {clusteringResult?.clustering && clusteringResult.clustering.archetype_profiles.length > 0 && (
-                          <Wrap spacing={2} mt={3}>
-                            {clusteringResult.clustering.archetype_profiles.map(a => (
-                              <WrapItem key={a.archetype_id}>
-                                <Tag size="sm" colorScheme="teal" variant="subtle">
-                                  <TagLabel>Archetype {a.archetype_id}: {a.archetype_label} ({a.point_count} pts)</TagLabel>
-                                </Tag>
-                              </WrapItem>
+                            {clusteringCharts.map(chart => (
+                              <ChartHost
+                                key={chart.id}
+                                ref={setChartRef(chart.id)}
+                                descriptor={chart}
+                                ctx={chartCtx}
+                                onHide={toggleChart}
+                                projectId={routeProjectId ?? null}
+                                projectContext={chartProjectContext}
+                                showAiSummary={showAiSummary}
+                                forceMount={exporting}
+                              />
                             ))}
-                          </Wrap>
-                        )}
-                      </CardBody>
-                    </Card>
-
-                    {/* Clustering charts */}
-                    {clusteringCharts.map(chart => (
-                      <ChartHost key={chart.id} descriptor={chart} ctx={chartCtx} onHide={toggleChart} />
-                    ))}
+                          </VStack>
+                        </AccordionPanel>
+                      </AccordionItem>
+                    </Accordion>
                   </VStack>
                 )}
               </TabPanel>
@@ -849,7 +1198,7 @@ function Reports() {
                           <HStack flex="1" justify="space-between" pr={2}>
                             <HStack spacing={3}>
                               <Text fontWeight="bold">{zone.zone_name}</Text>
-                              <Badge colorScheme={deviationColorScheme(zone.mean_abs_z)}>|z|={zone.mean_abs_z?.toFixed(2) ?? '-'}</Badge>
+                              <Badge colorScheme={deviationColorScheme(zone.mean_abs_z)}>|z|={zone.mean_abs_z?.toFixed(2) ?? '—'}</Badge>
                             </HStack>
                             <Text fontSize="sm" color="gray.500">{zone.design_strategies.length} strategies</Text>
                           </HStack>
